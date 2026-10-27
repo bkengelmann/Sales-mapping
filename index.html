@@ -1,0 +1,486 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#00664F">
+<title>Sale Inspector</title>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'%3E%3Crect width='64' height='64' rx='12' fill='%2300664F'/%3E%3Cpath d='M32 10c-9 0-16 7-16 16 0 12 16 28 16 28s16-16 16-28c0-9-7-16-16-16z' fill='%23fff'/%3E%3Ccircle cx='32' cy='26' r='6' fill='%2300664F'/%3E%3C/svg%3E">
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Barlow:wght@400;500;600&family=Barlow+Semi+Condensed:wght@600;700&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.css">
+<style>
+  :root {
+    --sign: #00664F;          /* highway guide-sign green */
+    --sign-ink: #ffffff;
+    --panel: #ffffff;
+    --ink: #1d2421;
+    --muted: #56625c;
+    --line: #d3dad6;
+    --field: #f0f3f1;
+    --good: #00664F;
+    --bad: #b3261e;
+    --parcel: #00e5ff;        /* same cyan as the DataLog aerials */
+    color-scheme: light;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --sign: #00785d;
+      --panel: #18201d;
+      --ink: #eef2f0;
+      --muted: #a3b0aa;
+      --line: #34413c;
+      --field: #222c28;
+      --good: #4fd1a5;
+      --bad: #ff8a80;
+      color-scheme: dark;
+    }
+  }
+  html, body { height: 100%; margin: 0; }
+  body { font-family: Barlow, system-ui, -apple-system, "Segoe UI", sans-serif; font-size: 16px; color: var(--ink); background: var(--panel); }
+  #map { position: fixed; inset: 0; background: #2b2f2d; }
+
+  .bar {
+    position: fixed; z-index: 1000;
+    top: calc(env(safe-area-inset-top, 0px) + 10px); left: 10px; right: 10px;
+    max-width: 640px; margin: 0 auto;
+    display: flex; gap: 6px; padding: 6px;
+    background: var(--panel); border-radius: 12px;
+    box-shadow: 0 2px 10px rgba(0,0,0,.35);
+  }
+  select, input, button, .btn {
+    font: inherit; min-height: 44px; box-sizing: border-box;
+    border-radius: 8px; border: 1px solid var(--line);
+    background: var(--field); color: var(--ink); padding: 0 10px;
+  }
+  .btn { display: inline-flex; align-items: center; justify-content: center; text-decoration: none; }
+  #county { flex: 0 0 auto; max-width: 36%; }
+  #pid { flex: 1 1 auto; min-width: 0; }
+  .primary { background: var(--sign); color: var(--sign-ink); border-color: var(--sign); font-weight: 600; }
+  button:disabled { opacity: .6; }
+  :focus-visible { outline: 3px solid var(--parcel); outline-offset: 2px; }
+
+  .sheet {
+    position: fixed; z-index: 1000; left: 0; right: 0; bottom: 0;
+    max-width: 640px; margin: 0 auto; max-height: 55vh; overflow-y: auto;
+    background: var(--panel); border-radius: 16px 16px 0 0;
+    box-shadow: 0 -2px 12px rgba(0,0,0,.35);
+    padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 12px);
+    box-sizing: border-box;
+  }
+  .sale { font-weight: 600; color: var(--muted); font-size: 15px; min-height: 1em; }
+  .readout {
+    font-family: "Barlow Semi Condensed", Barlow, sans-serif; font-weight: 700;
+    font-size: 46px; line-height: 1.05; margin: 2px 0 2px; letter-spacing: -.01em;
+  }
+  .readout.inside { color: var(--good); }
+  .sub { color: var(--muted); line-height: 1.35; }
+  details { margin-top: 10px; border-top: 1px solid var(--line); padding-top: 8px; }
+  summary { cursor: pointer; font-weight: 600; min-height: 32px; display: flex; align-items: center; }
+  dl { display: grid; grid-template-columns: auto 1fr; gap: 4px 12px; margin: 6px 0 0; }
+  dt { color: var(--muted); }
+  dd { margin: 0; overflow-wrap: anywhere; }
+  .tapped { margin-top: 10px; padding: 10px 12px; border-radius: 10px; background: var(--field); line-height: 1.4; }
+  .tapped .ok { color: var(--good); font-weight: 600; }
+  .tapped .no { color: var(--bad); font-weight: 600; }
+  .tapped button { margin-top: 8px; }
+  .actions { display: flex; gap: 6px; margin-top: 12px; }
+  .actions > * { flex: 1 1 0; font-weight: 600; }
+  .status { margin-top: 8px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
+  .status.err { color: var(--bad); }
+
+  .leaflet-top { top: calc(env(safe-area-inset-top, 0px) + 66px); }
+  .leaflet-bottom { bottom: var(--sheet-h, 0px); }
+  .leaflet-control-layers { font-family: inherit; }
+  @media (prefers-reduced-motion: reduce) { .leaflet-zoom-anim .leaflet-zoom-animated { transition: none !important; } }
+</style>
+</head>
+<body>
+<div id="map" aria-label="Map"></div>
+
+<div class="bar">
+  <select id="county" aria-label="County"></select>
+  <input id="pid" placeholder="Parcel ID(s)" autocomplete="off" autocapitalize="characters" spellcheck="false" aria-label="Parcel IDs, comma separated">
+  <button id="find" class="primary">Find</button>
+</div>
+
+<section class="sheet" id="sheet">
+  <div class="sale" id="saleName"></div>
+  <div class="readout" id="readout" aria-live="polite">Pick a parcel</div>
+  <div class="sub" id="sub">Enter a parcel ID above, or tap a field on the map.</div>
+  <div class="tapped" id="tapped" hidden></div>
+  <details id="details" hidden>
+    <summary>Parcel details</summary>
+    <dl id="facts"></dl>
+  </details>
+  <div class="actions">
+    <button id="here">Parcel I’m in</button>
+    <button id="center">Center on me</button>
+    <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
+  </div>
+  <div class="status" id="status"></div>
+</section>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script>
+"use strict";
+// ---------------------------------------------------------------------------
+// Sale Inspector v0.1 — shows where a sale parcel is relative to you.
+// Parcels come from District III county GIS (same source as the DataLog builder).
+// ---------------------------------------------------------------------------
+const D3 = "https://gis.districtiii.org/server/rest/services";
+const COUNTIES = ["Aurora","Bennett","Bon Homme","Brule","Buffalo","Butte","Campbell","Charles Mix","Davison",
+  "Day","Douglas","Faulk","Gregory","Haakon","Hanson","Hughes","Hutchinson","Jackson","Jerauld","Jones","Lyman",
+  "Marshall","McPherson","Mellette","Potter","Sanborn","Stanley","Sully","Todd","Tripp","Turner","Ziebach"];
+const ID_FIELDS = ["parcel_id","PARCEL","PARCELID","PIN","TAXID","TAX_ID","PARCELNO"];
+const LEGAL_FIELDS = ["LEGAL","LEGAL_DESC","LEGALDESC","LEGAL_DESCRIPTION"];
+const ACRE_FIELDS = ["DEEDED_ACRE","DEEDED_ACRES","DEEDEDACRES","ACRES","DEED_ACRES"];
+const OWNER_FIELDS = ["OWNER","OWNER_NAME","OWNERNAME","OWNER1","OWN_NAME","NAME1"];
+
+const $ = id => document.getElementById(id);
+const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
+
+// ---------------- network: fetch, with JSONP fallback if CORS blocks it ----------------
+let transport = "fetch";
+function jsonp(url) {
+  return new Promise((resolve, reject) => {
+    const cb = "_cb" + Math.random().toString(36).slice(2);
+    const s = document.createElement("script");
+    const timer = setTimeout(() => { done(); reject(new Error("County GIS did not answer (timed out).")); }, 25000);
+    function done() { clearTimeout(timer); delete window[cb]; s.remove(); }
+    window[cb] = data => { done(); resolve(data); };
+    s.onerror = () => { done(); reject(new Error("County GIS request was blocked.")); };
+    s.src = url + (url.includes("?") ? "&" : "?") + "callback=" + cb;
+    document.head.appendChild(s);
+  });
+}
+async function arc(url, params = {}) {
+  const full = url + "?" + new URLSearchParams({ ...params, f: "json" });
+  let data;
+  if (transport === "fetch") {
+    try {
+      const r = await fetch(full);
+      data = await r.json();
+    } catch (e) {
+      transport = "jsonp";                 // CORS or network refusal: try the script-tag route
+      data = await jsonp(full);
+    }
+  } else {
+    data = await jsonp(full);
+  }
+  if (data && data.error) throw new Error("County GIS error: " + (data.error.message || "unknown"));
+  return data;
+}
+
+// ---------------- county discovery (mirrors the Python builder) ----------------
+function pick(fields, cands) {
+  const low = Object.fromEntries(fields.map(f => [f.toLowerCase(), f]));
+  for (const c of cands) if (low[c.toLowerCase()]) return low[c.toLowerCase()];
+  return null;
+}
+async function countyCfg(name) {
+  const key = "si.cfg." + name;
+  try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 1) return c; } catch (e) {}
+  const tag = (name === "Tripp" || name === "Todd") ? "TRIPP_TODD" : name.toUpperCase().replace(/ /g, "_");
+  const root = await arc(D3);
+  const cands = (root.services || []).filter(s => {
+    const n = s.name.toUpperCase();
+    return s.type === "MapServer" && n.startsWith(tag + "_") && n.includes("LAYERS") && !n.includes("FSA");
+  }).map(s => s.name);
+  const yr = n => parseInt(n.slice(-2).replace(/\D/g, "") || "0", 10);
+  cands.sort((a, b) => (a.toUpperCase().includes("WEB") ? 0 : 1) - (b.toUpperCase().includes("WEB") ? 0 : 1) || yr(b) - yr(a));
+  for (const svc of cands) {
+    const url = `${D3}/${svc}/MapServer`;
+    const meta = await arc(url);
+    const lyr = (meta.layers || []).find(l => l.name.trim().toLowerCase() === "parcels");
+    if (!lyr) continue;
+    const info = await arc(`${url}/${lyr.id}`);
+    const fields = (info.fields || []).map(f => f.name);
+    const cfg = { v: 1, layer: `${url}/${lyr.id}`, id: pick(fields, ID_FIELDS),
+                  legal: pick(fields, LEGAL_FIELDS), acres: pick(fields, ACRE_FIELDS), owner: pick(fields, OWNER_FIELDS) };
+    if (!cfg.id) continue;
+    try { localStorage.setItem(key, JSON.stringify(cfg)); } catch (e) {}
+    return cfg;
+  }
+  throw new Error(`No parcel layer found for ${name} County on District III.`);
+}
+
+function toParcels(cfg, data) {
+  const out = [], seen = new Set();
+  for (const ft of (data.features || [])) {
+    const a = ft.attributes || {};
+    const id = String(a[cfg.id] ?? "").trim();
+    if (!id || seen.has(id)) continue;
+    seen.add(id);
+    out.push({
+      id,
+      legal: String(cfg.legal ? (a[cfg.legal] ?? "") : "").replace(/\s+OSR=.*$/, "").replace(/\s{2,}/g, " ").trim(),
+      acres: cfg.acres ? Number(a[cfg.acres]) || null : null,
+      owner: cfg.owner ? String(a[cfg.owner] ?? "").trim() : "",
+      rings: (ft.geometry && ft.geometry.rings) || []
+    });
+  }
+  return out.filter(p => p.rings.length);
+}
+async function parcelsByIds(cfg, ids) {
+  const where = `${cfg.id} IN (${ids.map(i => "'" + i.replace(/'/g, "''") + "'").join(",")})`;
+  return toParcels(cfg, await arc(cfg.layer + "/query",
+    { where, outFields: "*", returnGeometry: true, outSR: 4326 }));
+}
+async function parcelAt(cfg, lat, lng) {
+  return toParcels(cfg, await arc(cfg.layer + "/query", {
+    geometry: `${lng},${lat}`, geometryType: "esriGeometryPoint", inSR: 4326,
+    spatialRel: "esriSpatialRelIntersects", outFields: "*", returnGeometry: true, outSR: 4326 }));
+}
+
+// ---------------- map ----------------
+const map = L.map("map", { zoomControl: false, maxZoom: 19 }).setView([44.2, -99.6], 7);
+const aerial = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19, maxNativeZoom: 19, attribution: "Imagery: Esri, Maxar" });
+const naip = L.tileLayer("https://basemap.nationalmap.gov/arcgis/rest/services/USGSImageryOnly/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19, maxNativeZoom: 16, attribution: "Imagery: USGS" });
+const streets = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
+  { maxZoom: 19, attribution: "© OpenStreetMap contributors" });
+const roads = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
+  { maxZoom: 19, attribution: "Roads: Esri" });
+aerial.addTo(map); roads.addTo(map);
+L.control.layers({ "Aerial": aerial, "Aerial (USGS)": naip, "Street map": streets }, { "Road names": roads },
+  { position: "topright" }).addTo(map);
+
+const saleLayer = L.layerGroup().addTo(map);
+const tapLayer = L.layerGroup().addTo(map);
+const lineLayer = L.layerGroup().addTo(map);
+const SALE_STYLE = { color: "#00e5ff", weight: 4, fillColor: "#00e5ff", fillOpacity: 0.12, interactive: false };
+const TAP_STYLE = { color: "#ffffff", weight: 3, dashArray: "8 6", fillColor: "#ffffff", fillOpacity: 0.08, interactive: false };
+
+function latlngs(p) { return p.rings.map(r => r.map(([x, y]) => [y, x])); }
+function drawParcels(layer, parcels, style) {
+  layer.clearLayers();
+  for (const p of parcels) {
+    L.polygon(latlngs(p), { color: "#000", weight: style.weight + 3, fill: false, opacity: .6, interactive: false }).addTo(layer);
+    L.polygon(latlngs(p), style).addTo(layer);
+  }
+}
+function boundsOf(parcels) { return L.latLngBounds(parcels.flatMap(p => p.rings.flat().map(([x, y]) => [y, x]))); }
+
+// keep Leaflet controls and fitBounds clear of the bottom sheet
+const sheet = $("sheet");
+new ResizeObserver(() => document.documentElement.style.setProperty("--sheet-h", sheet.offsetHeight + "px")).observe(sheet);
+function fit(b) { map.fitBounds(b, { paddingTopLeft: [24, 90], paddingBottomRight: [24, sheet.offsetHeight + 24], maxZoom: 17 }); }
+
+// ---------------- state ----------------
+let sale = [];          // the parcel(s) being inspected
+let saleLabel = "";
+let me = null;          // {lat, lng, acc}
+let gpsMsg = "";
+let meDot = null, meRing = null, centeredOnce = false;
+
+// ---------------- geometry: where is the parcel relative to me ----------------
+function compass(dx, dy) {
+  const a = (Math.atan2(dx, dy) * 180 / Math.PI + 360) % 360;
+  return ["N","NE","E","SE","S","SW","W","NW"][Math.round(a / 45) % 8];
+}
+function relation(pos, parcels) {
+  const kx = 111320 * Math.cos(pos.lat * Math.PI / 180), ky = 110540;
+  const P = ([x, y]) => [(x - pos.lng) * kx, (y - pos.lat) * ky];      // metres, me at origin
+  let inside = false, best = Infinity, bp = [0, 0];
+  for (const p of parcels) for (const ring of p.rings) {
+    const pts = ring.map(P);
+    for (let i = 0; i < pts.length; i++) {
+      const a = pts[i], b = pts[(i + 1) % pts.length];
+      if ((a[1] > 0) !== (b[1] > 0)) {
+        const xi = a[0] + (0 - a[1]) * (b[0] - a[0]) / (b[1] - a[1]);
+        if (xi > 0) inside = !inside;
+      }
+      const dx = b[0] - a[0], dy = b[1] - a[1], L2 = dx * dx + dy * dy;
+      const t = L2 ? Math.max(0, Math.min(1, -(a[0] * dx + a[1] * dy) / L2)) : 0;
+      const cx = a[0] + t * dx, cy = a[1] + t * dy, d = Math.hypot(cx, cy);
+      if (d < best) { best = d; bp = [cx, cy]; }
+    }
+  }
+  return { inside, dist: best, dir: compass(bp[0], bp[1]), pt: [pos.lat + bp[1] / ky, pos.lng + bp[0] / kx] };
+}
+function fmtDist(m) {
+  const mi = m / 1609.344;
+  if (mi < 0.1) return `${Math.round(m * 3.28084 / 10) * 10} ft`;
+  return `${mi < 10 ? mi.toFixed(2) : mi.toFixed(1)} mi`;
+}
+
+// ---------------- rendering ----------------
+function setStatus(t, err = false) { const s = $("status"); s.textContent = t; s.classList.toggle("err", err); }
+function gpsLine() {
+  const bits = [];
+  if (me) bits.push(`GPS ±${fmtDist(me.acc)}`);
+  if (transport === "jsonp") bits.push("county GIS via fallback route");
+  return bits.join(", ");
+}
+
+function renderFacts() {
+  const d = $("details");
+  if (!sale.length) { d.hidden = true; return; }
+  const acres = sale.reduce((t, p) => t + (p.acres || 0), 0);
+  const owners = [...new Set(sale.map(p => p.owner).filter(Boolean))];
+  const legals = sale.map(p => p.legal).filter(Boolean);
+  const rows = [["Parcel", sale.map(p => p.id).join(", ")]];
+  if (acres) rows.push(["Acres", acres.toLocaleString(undefined, { maximumFractionDigits: 2 })]);
+  if (owners.length) rows.push(["Owner", owners.join("; ")]);
+  if (legals.length) rows.push(["Legal", legals.join("; ")]);
+  $("facts").innerHTML = rows.map(([k, v]) => `<dt>${esc(k)}</dt><dd>${esc(v)}</dd>`).join("");
+  d.hidden = false;
+}
+
+function update() {
+  lineLayer.clearLayers();
+  const ro = $("readout"), sub = $("sub");
+  ro.classList.remove("inside");
+  $("saleName").textContent = sale.length ? (saleLabel || sale.map(p => p.id).join(", ")) : "";
+  renderFacts();
+  const nav = $("nav");
+  if (sale.length) {
+    const c = boundsOf(sale).getCenter();
+    nav.href = `https://www.google.com/maps/dir/?api=1&destination=${c.lat.toFixed(6)},${c.lng.toFixed(6)}`;
+    nav.removeAttribute("aria-disabled");
+  } else { nav.removeAttribute("href"); nav.setAttribute("aria-disabled", "true"); }
+
+  if (!sale.length) {
+    ro.textContent = "Pick a parcel";
+    sub.textContent = "Enter a parcel ID above, or tap a field on the map.";
+  } else if (!me) {
+    ro.textContent = "Finding you…";
+    sub.textContent = gpsMsg || "Allow location when the browser asks.";
+  } else {
+    const r = relation(me, sale);
+    let note = "";
+    if (r.inside) {
+      ro.textContent = "You’re on it";
+      ro.classList.add("inside");
+      note = `Inside the sale parcel, ${fmtDist(r.dist)} from the nearest line.`;
+    } else {
+      ro.textContent = `${fmtDist(r.dist)} ${r.dir}`;
+      note = "To the nearest line of the sale parcel.";
+      L.polyline([[me.lat, me.lng], r.pt], { color: "#00e5ff", weight: 3, dashArray: "4 8", interactive: false }).addTo(lineLayer);
+    }
+    if (me.acc && r.dist < me.acc) note += ` That’s within GPS error (±${fmtDist(me.acc)}), so check the line by eye.`;
+    sub.textContent = note;
+  }
+  if (!$("status").classList.contains("err")) setStatus(gpsLine());
+}
+
+function showTapped(p, fromMe) {
+  const box = $("tapped");
+  if (!p) { box.hidden = true; tapLayer.clearLayers(); return; }
+  drawParcels(tapLayer, [p], TAP_STYLE);
+  const isSale = sale.some(s => s.id === p.id);
+  const lead = fromMe ? "You’re standing in" : "Tapped";
+  const meta = [p.owner, p.acres ? `${p.acres} ac` : ""].filter(Boolean).join(", ");
+  box.innerHTML = `${lead} <b>${esc(p.id)}</b>: `
+    + (isSale ? `<span class="ok">this is the sale parcel.</span>` : `<span class="no">not the sale parcel.</span>`)
+    + (meta ? `<br>${esc(meta)}` : "")
+    + (p.legal ? `<br>${esc(p.legal)}` : "")
+    + (isSale ? "" : `<br><button id="useTapped">Inspect this parcel instead</button>`);
+  box.hidden = false;
+  const btn = $("useTapped");
+  if (btn) btn.onclick = () => { setSale([p], ""); showTapped(null); };
+}
+
+function setSale(parcels, label) {
+  sale = parcels;
+  saleLabel = label || "";
+  $("pid").value = parcels.map(p => p.id).join(", ");
+  drawParcels(saleLayer, sale, SALE_STYLE);
+  const b = boundsOf(sale);
+  if (me && map.distance([me.lat, me.lng], b.getCenter()) < 8000) b.extend([me.lat, me.lng]);
+  fit(b);
+  update();
+}
+
+// ---------------- actions ----------------
+async function findSale(label) {
+  const county = $("county").value;
+  const ids = $("pid").value.split(/[,;]/).map(t => t.trim()).filter(Boolean);
+  if (!ids.length) { setStatus("Enter a parcel ID first.", true); return; }
+  const btn = $("find");
+  btn.disabled = true; btn.textContent = "Finding…";
+  setStatus(`Looking up ${ids.length > 1 ? "parcels" : "parcel"} in ${county} County…`);
+  try {
+    const cfg = await countyCfg(county);
+    const found = await parcelsByIds(cfg, ids);
+    if (!found.length) throw new Error(`No parcel ${ids.join(", ")} in ${county} County. Check the ID and the county.`);
+    showTapped(null);
+    setStatus("");
+    setSale(found, label);
+    const missing = ids.filter(i => !found.some(p => p.id === i));
+    if (missing.length) setStatus(`Not found in ${county} County: ${missing.join(", ")}`, true);
+  } catch (e) {
+    setStatus(e.message, true);
+  } finally {
+    btn.disabled = false; btn.textContent = "Find";
+  }
+}
+
+async function identify(lat, lng, fromMe) {
+  const county = $("county").value;
+  setStatus(`Checking ${county} County parcels…`);
+  try {
+    const cfg = await countyCfg(county);
+    const found = await parcelAt(cfg, lat, lng);
+    if (!found.length) { setStatus(`No ${county} County parcel at that spot. Check the county.`, true); return; }
+    setStatus("");
+    if (!sale.length) setSale([found[0]], "");
+    else showTapped(found[0], fromMe);
+    update();
+  } catch (e) {
+    setStatus(e.message, true);
+  }
+}
+
+// ---------------- GPS ----------------
+function onPosition(pos) {
+  me = { lat: pos.coords.latitude, lng: pos.coords.longitude, acc: pos.coords.accuracy };
+  gpsMsg = "";
+  const ll = [me.lat, me.lng];
+  if (!meDot) {
+    meRing = L.circle(ll, { radius: me.acc, color: "#2f80ff", weight: 1, fillOpacity: .12, interactive: false }).addTo(map);
+    meDot = L.circleMarker(ll, { radius: 8, color: "#fff", weight: 3, fillColor: "#2f80ff", fillOpacity: 1, interactive: false }).addTo(map);
+  } else { meDot.setLatLng(ll); meRing.setLatLng(ll).setRadius(me.acc); }
+  if (!centeredOnce && !sale.length) { map.setView(ll, 16); centeredOnce = true; }
+  if (!$("status").classList.contains("err")) setStatus(gpsLine());
+  update();
+}
+function onGpsError(err) {
+  gpsMsg = err.code === 1
+    ? "Location is blocked for this page. Turn it on in the browser’s site settings, then reload."
+    : err.code === 3 ? "Still waiting on GPS. Open sky helps."
+    : "Location is unavailable right now.";
+  update();
+}
+if ("geolocation" in navigator) {
+  navigator.geolocation.watchPosition(onPosition, onGpsError, { enableHighAccuracy: true, maximumAge: 5000, timeout: 30000 });
+} else {
+  gpsMsg = "This browser can’t share location.";
+}
+
+// ---------------- wiring ----------------
+const sel = $("county");
+sel.innerHTML = COUNTIES.map(c => `<option>${esc(c)}</option>`).join("");
+try { sel.value = localStorage.getItem("si.county") || "Turner"; } catch (e) { sel.value = "Turner"; }
+sel.onchange = () => { try { localStorage.setItem("si.county", sel.value); } catch (e) {} };
+
+$("find").onclick = () => findSale("");
+$("pid").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); findSale(""); } });
+$("here").onclick = () => me ? identify(me.lat, me.lng, true) : setStatus("No GPS fix yet.", true);
+$("center").onclick = () => me ? map.setView([me.lat, me.lng], Math.max(map.getZoom(), 16)) : setStatus("No GPS fix yet.", true);
+map.on("click", e => identify(e.latlng.lat, e.latlng.lng, false));
+
+// Links like ?county=Turner&pid=15000-09755-161-04&label=Haffner%20to%20Neuharth open straight to a sale
+const q = new URLSearchParams(location.search);
+if (q.get("county")) {
+  const c = COUNTIES.find(n => n.toLowerCase() === q.get("county").trim().toLowerCase());
+  if (c) sel.value = c;
+}
+if (q.get("pid")) { $("pid").value = q.get("pid"); findSale(q.get("label") || ""); }
+update();
+</script>
+</body>
+</html>
