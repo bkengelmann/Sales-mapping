@@ -138,7 +138,8 @@ const D3_COUNTIES = ["Aurora","Bennett","Bon Homme","Brule","Buffalo","Butte","C
 const FD_COUNTIES = ["Beadle","Clark","Codington","Deuel","Edmunds","Grant","Hamlin","Hand","Kingsbury","Lake",
   "Lawrence","Miner","Moody","Roberts"];
 const SINGLE = {
-  "Minnehaha": { src: "Minnehaha County GIS", url: "https://gis.minnehahacounty.gov/minnemap/rest/services/Parcels/MapServer" },
+  "Minnehaha": { src: "Minnehaha County GIS", url: "https://gis.minnehahacounty.gov/minnemap/rest/services/Parcels/MapServer",
+                 fields: { id: "MRRDID", also: ["MAP_ID", "TAG"], owner: "MRTNM1", acres: "TOTAL_ACREAGE", legal: "LEGAL_DESC" } },
   "Lincoln": { src: "Lincoln County GIS", url: "https://gis.lincolncountysd.gov/arcgis/rest/services/Pro29/Map/MapServer" },
   "Pennington": { src: "Pennington County GIS", url: "https://gis.rcgov.org/server/rest/services/PublicSites/CommunityData/MapServer" }
 };
@@ -210,18 +211,23 @@ function parcelLayerId(layers, county) {
   return best ? best.id : null;
 }
 
-async function layerCfg(svcUrl, id, src, county) {
+async function layerCfg(svcUrl, id, src, county, over = {}) {
   const info = await arc(`${svcUrl}/${id}`);
   const fdef = info.fields || [];
   const fields = fdef.map(f => f.name);
   const type = Object.fromEntries(fdef.map(f => [f.name, f.type]));
-  const idf = pick(fields, ID_FIELDS);
+  const has = f => f && fields.includes(f) ? f : null;
+  const isNum = f => /Integer|Double|Single/.test(type[f] || "");
+  const idf = has(over.id) || pick(fields, ID_FIELDS);
   if (!idf) throw new Error(`${county} County parcel layer found, but no parcel ID field. Fields: ${fields.join(", ")}`);
+  const also = (over.also || []).map(has).filter(Boolean).map(f => ({ f, numeric: isNum(f) }));
   return {
     v: 2, src, layer: `${svcUrl}/${id}`, layerName: info.name,
-    id: idf, idNumeric: /Integer|Double|Single/.test(type[idf] || ""),
+    id: idf, idNumeric: isNum(idf), also,
     alt: idf === "RECORD" ? pick(fields, ["RECORD_1"]) : null,      // First District keeps a numeric copy
-    legal: pick(fields, LEGAL_FIELDS), acres: pick(fields, ACRE_FIELDS), owner: pick(fields, OWNER_FIELDS)
+    legal: has(over.legal) || pick(fields, LEGAL_FIELDS),
+    acres: has(over.acres) || pick(fields, ACRE_FIELDS),
+    owner: has(over.owner) || pick(fields, OWNER_FIELDS)
   };
 }
 
@@ -261,11 +267,11 @@ async function discoverFD(name) {
 }
 
 async function discoverSingle(name) {
-  const { url, src } = SINGLE[name];
+  const { url, src, fields } = SINGLE[name];
   const meta = await arc(url);
   const id = parcelLayerId(meta.layers, name);
   if (id === null) throw new Error(`No parcel layer found on ${src}. Layers: ${(meta.layers || []).map(l => l.name).join(", ")}`);
-  return await layerCfg(url, id, src, name);
+  return await layerCfg(url, id, src, name, fields || {});
 }
 
 async function countyCfg(name) {
@@ -290,6 +296,7 @@ function toParcels(cfg, data) {
     const ac = cfg.acres ? parseFloat(String(a[cfg.acres] ?? "").replace(/[^0-9.]/g, "")) : NaN;
     out.push({
       id, src: cfg.src,
+      keys: [id, ...(cfg.also || []).map(x => a[x.f]), cfg.alt ? a[cfg.alt] : null].filter(v => v != null && v !== "").map(normId),
       legal: String(cfg.legal ? (a[cfg.legal] ?? "") : "").replace(/\s+OSR=.*$/, "").replace(/\s{2,}/g, " ").trim(),
       acres: isFinite(ac) && ac > 0 ? ac : null,
       owner: cfg.owner ? String(a[cfg.owner] ?? "").trim() : "",
@@ -300,19 +307,18 @@ function toParcels(cfg, data) {
 }
 function idWhere(cfg, ids) {
   const nums = ids.map(i => Number(i)).filter(n => isFinite(n));
-  const parts = [];
-  if (cfg.idNumeric) { if (nums.length) parts.push(`${cfg.id} IN (${nums.join(",")})`); }
-  else {
-    // exact text, plus zero-padded/unpadded variants (record numbers are often stored padded)
-    const vals = new Set();
-    for (const i of ids) {
-      vals.add(i); vals.add(i.toUpperCase());
-      if (/^\d+$/.test(i)) { const b = i.replace(/^0+(?=\d)/, ""); vals.add(b); for (let w = b.length + 1; w <= 7; w++) vals.add(b.padStart(w, "0")); }
-    }
-    parts.push(`${cfg.id} IN (${[...vals].map(v => "'" + v.replace(/'/g, "''") + "'").join(",")})`);
+  // exact text, plus zero-padded/unpadded variants (record numbers are often stored padded)
+  const vals = new Set();
+  for (const i of ids) {
+    vals.add(i); vals.add(i.toUpperCase());
+    if (/^\d+$/.test(i)) { const b = i.replace(/^0+(?=\d)/, ""); vals.add(b); for (let w = b.length + 1; w <= 7; w++) vals.add(b.padStart(w, "0")); }
   }
-  if (cfg.alt && nums.length) parts.push(`${cfg.alt} IN (${nums.join(",")})`);
-  return parts.join(" OR ");
+  const txt = [...vals].map(v => "'" + v.replace(/'/g, "''") + "'").join(",");
+  const clause = (f, numeric) => numeric ? (nums.length ? `${f} IN (${nums.join(",")})` : null) : `${f} IN (${txt})`;
+  const parts = [clause(cfg.id, cfg.idNumeric)];
+  for (const a of (cfg.also || [])) parts.push(clause(a.f, a.numeric));
+  if (cfg.alt) parts.push(clause(cfg.alt, true));
+  return parts.filter(Boolean).join(" OR ") || "1=0";
 }
 async function parcelsByIds(cfg, ids) {
   return toParcels(cfg, await arc(cfg.layer + "/query",
@@ -501,7 +507,7 @@ async function findSale(label) {
     showTapped(null);
     setStatus("");
     setSale(found, label);
-    const missing = ids.filter(i => !found.some(p => normId(p.id) === normId(i)));
+    const missing = ids.filter(i => !found.some(p => (p.keys || [normId(p.id)]).includes(normId(i))));
     if (missing.length) setStatus(`Not found in ${county} County: ${missing.join(", ")}`, true);
   } catch (e) {
     setStatus(e.message, true);
