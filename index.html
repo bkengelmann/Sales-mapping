@@ -134,14 +134,14 @@
     <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
   </div>
   <div class="status" id="status"></div>
-  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.5</span>
+  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.6</span>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.5 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.6 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
 // ---------------------------------------------------------------------------
@@ -167,7 +167,7 @@ const ID_FIELDS = ["parcel_id","PARCELID","PARCEL","PARCELNO","PARCEL_NO","PARCE
   "RECORD","RECORD_NO","RECORDNO","RECNO"];
 const LEGAL_FIELDS = ["LEGAL","LEGAL_DESC","LEGALDESC","LEGAL_DESCRIPTION","LEGALDESCR","LEGAL1"];
 const ACRE_FIELDS = ["DEEDED_ACRE","DEEDED_ACRES","DEEDEDACRES","LEGAL_ACRE","LEGAL_ACRES","ACRES","DEED_ACRES","GIS_ACRES","CALC_ACRES"];
-const OWNER_FIELDS = ["OWNER1","OWNER","OWNER_NAME","OWNERNAME","OWNER_1","OWN_NAME","NAME1","DEEDHOLDER","DEEDHOLD","DEED_HOLDER"];
+const OWNER_FIELDS = ["OWNER1","OWNER","OWNER_NAME","OWNERNAME","OWNER_1","OWN_NAME","NAME1","DEEDHOLDER","DEEDHOLD","DEED_HOLDER","CURRENT_OWNER","CURRENT_OW"];
 
 const $ = id => document.getElementById(id);
 const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -271,7 +271,7 @@ async function layerCfg(svcUrl, id, src, county, over = {}) {
   const acres = has(over.acres) || pick(fields, ACRE_FIELDS)
     || fuzzy(fields, /deed.*ac|legal.*ac/i) || fuzzy(fields, /acre|^ac$|_ac$|acres?_/i, /till|crop|pct|percent/i);
   return {
-    v: 5, src, layer, layerName: info.name, fields,
+    v: 6, src, layer, layerName: info.name, fields,
     id: idf, idNumeric: isNum(idf), also,
     alt: idf === "RECORD" ? pick(fields, ["RECORD_1"]) : null,      // First District keeps a numeric copy
     legal: has(over.legal) || pick(fields, LEGAL_FIELDS) || fuzzy(fields, /legal|descr/i, /acre|_ac$|date|code/i),
@@ -350,8 +350,8 @@ async function discoverSingle(name) {
 }
 
 async function countyCfg(name, fresh = false) {
-  const key = "si.cfg5." + name;
-  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 5) return c; } catch (e) {} }
+  const key = "si.cfg6." + name;
+  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 6) return c; } catch (e) {} }
   const src = sourceOf(name);
   const cfg = src === "d3" ? await discoverD3(name) : src === "fd" ? await discoverFD(name) : await discoverSingle(name);
   try { localStorage.setItem(key, JSON.stringify(cfg)); } catch (e) {}
@@ -716,7 +716,7 @@ async function testCounty(name) {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.5</small></h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.6</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
@@ -750,7 +750,7 @@ async function runSelfTest() {
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
   const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector v0.5 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const text = `Sale Inspector v0.6 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
