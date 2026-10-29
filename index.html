@@ -66,9 +66,19 @@
     max-width: 640px; margin: 0 auto; max-height: 55vh; overflow-y: auto;
     background: var(--panel); border-radius: 16px 16px 0 0;
     box-shadow: 0 -2px 12px rgba(0,0,0,.35);
-    padding: 14px 16px calc(env(safe-area-inset-bottom, 0px) + 12px);
+    padding: 4px 16px calc(env(safe-area-inset-bottom, 0px) + 12px);
     box-sizing: border-box;
   }
+  .grab { display: block; width: 100%; min-height: 26px; padding: 8px 0 10px; margin: 0; border: 0; background: none; cursor: pointer; }
+  .grab .grabbar { display: block; width: 44px; height: 5px; border-radius: 3px; background: var(--muted); opacity: .6; margin: 0 auto; }
+  .head { cursor: pointer; -webkit-tap-highlight-color: transparent; }
+  .verdict { font-weight: 600; margin-top: 2px; }
+  .verdict.ok { color: var(--good); }
+  .verdict.no { color: var(--bad); }
+  .sheet:not(.collapsed) .verdict { display: none; }
+  .sheet.collapsed #sheetBody, .sheet.collapsed .foot { display: none; }
+  .sheet.collapsed .readout { font-size: 34px; }
+  .sheet.collapsed .status:not(.err) { display: none; }
   .sale { font-weight: 600; color: var(--muted); font-size: 15px; min-height: 1em; }
   .readout {
     font-family: "Barlow Semi Condensed", Barlow, sans-serif; font-weight: 700;
@@ -120,8 +130,13 @@
 </div>
 
 <section class="sheet" id="sheet">
-  <div class="sale" id="saleName"></div>
-  <div class="readout" id="readout" aria-live="polite">Pick a parcel</div>
+  <button class="grab" id="grab" aria-expanded="true" aria-controls="sheetBody" aria-label="Hide details"><span class="grabbar"></span></button>
+  <div class="head" id="sheetHead">
+    <div class="sale" id="saleName"></div>
+    <div class="readout" id="readout" aria-live="polite">Pick a parcel</div>
+    <div class="verdict" id="verdict" hidden></div>
+  </div>
+  <div id="sheetBody">
   <div class="sub" id="sub">Enter a parcel ID above, or tap a field on the map.</div>
   <div class="tapped" id="tapped" hidden></div>
   <details id="details" hidden>
@@ -133,15 +148,16 @@
     <button id="center">Center on me</button>
     <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
   </div>
+  </div>
   <div class="status" id="status"></div>
-  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.6</span>
+  <div class="foot"><a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.7</span></div>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.6 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.7 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
 // ---------------------------------------------------------------------------
@@ -541,7 +557,8 @@ function update() {
 
 function showTapped(p, fromMe) {
   const box = $("tapped");
-  if (!p) { box.hidden = true; tapLayer.clearLayers(); return; }
+  const vd = $("verdict");
+  if (!p) { box.hidden = true; vd.hidden = true; tapLayer.clearLayers(); return; }
   drawParcels(tapLayer, [p], TAP_STYLE);
   const isSale = sale.some(s => s.id === p.id);
   const lead = fromMe ? "You’re standing in" : "Tapped";
@@ -552,6 +569,9 @@ function showTapped(p, fromMe) {
     + (p.legal ? `<br>${esc(p.legal)}` : "")
     + (isSale ? "" : `<br><button id="useTapped">Inspect this parcel instead</button>`);
   box.hidden = false;
+  vd.textContent = isSale ? `✓ ${fromMe ? "You’re in" : "Tapped"} the sale parcel` : `✗ ${fromMe ? "You’re in" : "Tapped"} ${p.id}, not the sale parcel`;
+  vd.className = "verdict " + (isSale ? "ok" : "no");
+  vd.hidden = false;
   const btn = $("useTapped");
   if (btn) btn.onclick = () => { setSale([p], ""); showTapped(null); };
 }
@@ -639,6 +659,28 @@ sel.innerHTML = COUNTIES.map(c => `<option>${esc(c)}</option>`).join("");
 try { sel.value = localStorage.getItem("si.county") || "Turner"; } catch (e) { sel.value = "Turner"; }
 sel.onchange = () => { try { localStorage.setItem("si.county", sel.value); } catch (e) {} };
 
+function setCollapsed(c) {
+  sheet.classList.toggle("collapsed", c);
+  const g = $("grab");
+  g.setAttribute("aria-expanded", String(!c));
+  g.setAttribute("aria-label", c ? "Show details" : "Hide details");
+  try { localStorage.setItem("si.collapsed", c ? "1" : "0"); } catch (e) {}
+}
+let swipedAt = 0;
+const toggleSheet = () => { if (Date.now() - swipedAt > 400) setCollapsed(!sheet.classList.contains("collapsed")); };
+for (const el of [$("grab"), $("sheetHead")]) {
+  el.addEventListener("click", toggleSheet);
+  let y0 = null;
+  el.addEventListener("touchstart", e => { y0 = e.touches[0].clientY; }, { passive: true });
+  el.addEventListener("touchend", e => {
+    if (y0 === null) return;
+    const dy = e.changedTouches[0].clientY - y0;
+    y0 = null;
+    if (Math.abs(dy) > 40) { setCollapsed(dy > 0); swipedAt = Date.now(); }
+  }, { passive: true });
+}
+try { setCollapsed(localStorage.getItem("si.collapsed") === "1"); } catch (e) {}
+
 $("find").onclick = () => findSale("");
 $("pid").addEventListener("keydown", e => { if (e.key === "Enter") { e.preventDefault(); findSale(""); } });
 $("here").onclick = () => me ? identify(me.lat, me.lng, true) : setStatus("No GPS fix yet.", true);
@@ -716,7 +758,7 @@ async function testCounty(name) {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.6</small></h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.7</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
@@ -750,7 +792,7 @@ async function runSelfTest() {
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
   const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector v0.6 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const text = `Sale Inspector v0.7 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
