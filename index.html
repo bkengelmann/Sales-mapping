@@ -134,14 +134,14 @@
     <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
   </div>
   <div class="status" id="status"></div>
-  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.3</span>
+  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.5</span>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.3 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.5 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
 // ---------------------------------------------------------------------------
@@ -150,12 +150,15 @@ const FD = "https://www.1stdistrict.org/arcgis/rest/services";
 const D3_COUNTIES = ["Aurora","Bennett","Bon Homme","Brule","Buffalo","Butte","Campbell","Charles Mix","Davison",
   "Day","Douglas","Faulk","Gregory","Haakon","Hanson","Hughes","Hutchinson","Jackson","Jerauld","Jones","Lyman",
   "Marshall","McPherson","Mellette","Potter","Sanborn","Stanley","Sully","Todd","Tripp","Turner","Ziebach"];
-const FD_COUNTIES = ["Beadle","Clark","Codington","Deuel","Edmunds","Grant","Hamlin","Hand","Kingsbury","Lake",
+const FD_COUNTIES = ["Beadle","Clark","Codington","Deuel","Edmunds","Grant","Hamlin","Hand","Kingsbury",
   "Lawrence","Miner","Moody","Roberts"];
 const SINGLE = {
   "Minnehaha": { src: "Minnehaha County GIS", url: "https://gis.minnehahacounty.gov/minnemap/rest/services/Parcels/MapServer",
                  fields: { id: "MRRDID", also: ["MAP_ID", "TAG"], owner: "MRTNM1", acres: "TOTAL_ACREAGE", legal: "LEGAL_DESC" } },
-  "Lincoln": { src: "Lincoln County GIS", root: "https://gis.lincolncountysd.gov/arcgis/rest/services" },
+  "Lincoln": { src: "Lincoln County GIS", root: "https://gis.lincolncountysd.gov/arcgis/rest/services",
+               url: "https://gis.lincolncountysd.gov/arcgis/rest/services/ParcelRelate/MapServer",
+               fields: { id: "Parcel.PID", also: ["Parcel.Incode", "GIS_Parcels.Parcel_ID"], owner: "GIS_Parcels.Name",
+                         legal: "Parcel.LegalDesc", acres: "GIS_Parcels.ReAcres" } },
   "Pennington": { src: "Pennington County GIS", root: "https://gis.rcgov.org/server/rest/services" }
 };
 const COUNTIES = [...D3_COUNTIES, ...FD_COUNTIES, ...Object.keys(SINGLE)].sort();
@@ -164,7 +167,7 @@ const ID_FIELDS = ["parcel_id","PARCELID","PARCEL","PARCELNO","PARCEL_NO","PARCE
   "RECORD","RECORD_NO","RECORDNO","RECNO"];
 const LEGAL_FIELDS = ["LEGAL","LEGAL_DESC","LEGALDESC","LEGAL_DESCRIPTION","LEGALDESCR","LEGAL1"];
 const ACRE_FIELDS = ["DEEDED_ACRE","DEEDED_ACRES","DEEDEDACRES","LEGAL_ACRE","LEGAL_ACRES","ACRES","DEED_ACRES","GIS_ACRES","CALC_ACRES"];
-const OWNER_FIELDS = ["OWNER1","OWNER","OWNER_NAME","OWNERNAME","OWNER_1","OWN_NAME","NAME1"];
+const OWNER_FIELDS = ["OWNER1","OWNER","OWNER_NAME","OWNERNAME","OWNER_1","OWN_NAME","NAME1","DEEDHOLDER","DEEDHOLD","DEED_HOLDER"];
 
 const $ = id => document.getElementById(id);
 const esc = t => String(t ?? "").replace(/[&<>"']/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&#39;"}[c]));
@@ -202,8 +205,14 @@ async function arc(url, params = {}) {
 }
 
 // ---------------- county discovery (mirrors the Python builder) ----------------
+const baseName = f => String(f).split(".").pop();
+const SYSTEM_FIELD = /^(objectid|fid|oid|globalid|shape|shape_?(area|length|leng)|st_area|st_length)/i;
 function pick(fields, cands) {
-  const low = Object.fromEntries(fields.map(f => [f.toLowerCase(), f]));
+  const low = {};
+  for (const f of fields) {                          // first field wins for a given bare name
+    const k = baseName(f).toLowerCase();
+    if (!(k in low)) low[k] = f;
+  }
   for (const c of cands) if (low[c.toLowerCase()]) return low[c.toLowerCase()];
   return null;
 }
@@ -230,8 +239,10 @@ function parcelLayerId(layers, county) {
 const layerNames = layers => (layers || []).map(l => l.name).join(", ") || "(none)";
 
 // Fallback field matching when the exact-name lists miss.
-function fuzzy(fields, re, not) { return fields.find(f => re.test(f) && !(not && not.test(f))) || null; }
-const NOT_OWNER = /addr|stre|city|state|_st$|zip|occ|add_?l|type|school|sub|twp|town|road|street|file|mail|code|date/i;
+function fuzzy(fields, re, not) {
+  return fields.find(f => { const b = baseName(f); return !SYSTEM_FIELD.test(b) && re.test(b) && !(not && not.test(b)); }) || null;
+}
+const NOT_OWNER = /addr|stre|city|state|_st$|zip|occ|add_?l|type|school|sub|twp|town|road|street|file|mail|code|date|bk|pg|book|page|ownership|2$/i;
 
 async function layerCfg(svcUrl, id, src, county, over = {}) {
   const layer = `${svcUrl}/${id}`;
@@ -241,7 +252,7 @@ async function layerCfg(svcUrl, id, src, county, over = {}) {
   if (!fields.length) throw new Error(`layer "${info.name}" has no readable fields`);
   const type = Object.fromEntries(fdef.map(f => [f.name, f.type]));
   const has = f => f && fields.includes(f) ? f : null;
-  const isNum = f => /Integer|Double|Single/.test(type[f] || "");
+  const isNum = f => /Integer|Double|Single|OID/.test(type[f] || "");
   // ID: first candidate field that actually holds values (Butte has an empty parcel_id)
   let idCands = over.id ? [has(over.id)].filter(Boolean) : [];
   if (!idCands.length) idCands = [...new Set(ID_FIELDS.map(c => pick(fields, [c])).filter(Boolean))];
@@ -260,12 +271,12 @@ async function layerCfg(svcUrl, id, src, county, over = {}) {
   const acres = has(over.acres) || pick(fields, ACRE_FIELDS)
     || fuzzy(fields, /deed.*ac|legal.*ac/i) || fuzzy(fields, /acre|^ac$|_ac$|acres?_/i, /till|crop|pct|percent/i);
   return {
-    v: 3, src, layer, layerName: info.name, fields,
+    v: 5, src, layer, layerName: info.name, fields,
     id: idf, idNumeric: isNum(idf), also,
     alt: idf === "RECORD" ? pick(fields, ["RECORD_1"]) : null,      // First District keeps a numeric copy
     legal: has(over.legal) || pick(fields, LEGAL_FIELDS) || fuzzy(fields, /legal|descr/i, /acre|_ac$|date|code/i),
     acres,
-    owner: has(over.owner) || pick(fields, OWNER_FIELDS) || fuzzy(fields, /owner|own_?nam|ownnam|taxpayer|grantee/i, NOT_OWNER)
+    owner: has(over.owner) || pick(fields, OWNER_FIELDS) || fuzzy(fields, /owner|own_?nam|ownnam|taxpayer|grantee|deedhold/i, NOT_OWNER)
   };
 }
 
@@ -339,8 +350,8 @@ async function discoverSingle(name) {
 }
 
 async function countyCfg(name, fresh = false) {
-  const key = "si.cfg3." + name;
-  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 3) return c; } catch (e) {} }
+  const key = "si.cfg5." + name;
+  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 5) return c; } catch (e) {} }
   const src = sourceOf(name);
   const cfg = src === "d3" ? await discoverD3(name) : src === "fd" ? await discoverFD(name) : await discoverSingle(name);
   try { localStorage.setItem(key, JSON.stringify(cfg)); } catch (e) {}
@@ -679,6 +690,7 @@ async function testCounty(name) {
   try {
     const cfg = await countyCfg(name, true);
     r.src = cfg.src;
+    r.layer = `${cfg.layer.replace(/^https?:\/\/[^/]+/, "")} "${cfg.layerName}", ID ${cfg.id}`;
     const warn = [];
     const p = await sampleParcel(cfg);
     const byId = await parcelsByIds(cfg, [p.id]);
@@ -695,7 +707,7 @@ async function testCounty(name) {
       + `; owner=${cfg.owner || "-"} legal=${cfg.legal || "-"} acres=${cfg.acres || "-"}`, ...warn);
     r.status = warn.length ? "WARN" : "PASS";
   } catch (e) {
-    r.notes.push(e.message || String(e));
+    r.notes.push((e.message || String(e)) + (r.layer ? ` [layer ${r.layer}]` : ""));
   }
   r.ms = Math.round(performance.now() - t0);
   return r;
@@ -704,7 +716,7 @@ async function testCounty(name) {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.3</small></h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.5</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
@@ -738,7 +750,7 @@ async function runSelfTest() {
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
   const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector v0.3 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const text = `Sale Inspector v0.5 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
