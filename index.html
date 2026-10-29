@@ -141,7 +141,7 @@
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.2 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.3 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
 // ---------------------------------------------------------------------------
@@ -155,12 +155,13 @@ const FD_COUNTIES = ["Beadle","Clark","Codington","Deuel","Edmunds","Grant","Ham
 const SINGLE = {
   "Minnehaha": { src: "Minnehaha County GIS", url: "https://gis.minnehahacounty.gov/minnemap/rest/services/Parcels/MapServer",
                  fields: { id: "MRRDID", also: ["MAP_ID", "TAG"], owner: "MRTNM1", acres: "TOTAL_ACREAGE", legal: "LEGAL_DESC" } },
-  "Lincoln": { src: "Lincoln County GIS", url: "https://gis.lincolncountysd.gov/arcgis/rest/services/Pro29/Map/MapServer" },
-  "Pennington": { src: "Pennington County GIS", url: "https://gis.rcgov.org/server/rest/services/PublicSites/CommunityData/MapServer" }
+  "Lincoln": { src: "Lincoln County GIS", root: "https://gis.lincolncountysd.gov/arcgis/rest/services" },
+  "Pennington": { src: "Pennington County GIS", root: "https://gis.rcgov.org/server/rest/services" }
 };
 const COUNTIES = [...D3_COUNTIES, ...FD_COUNTIES, ...Object.keys(SINGLE)].sort();
 const ID_FIELDS = ["parcel_id","PARCELID","PARCEL","PARCELNO","PARCEL_NO","PARCELNUM","PARCEL_NUM","PARCEL_NUMBER",
-  "PARCELNUMBER","PIN","TAXID","TAX_ID","TAXPARCEL","TAX_PARCEL","GEOPIN","RECORD"];
+  "PARCELNUMBER","PARCEL_NUMB","PARCELNUMB","PRCL_ID","PIN","PID","TAXID","TAX_ID","TAXPARCEL","TAX_PARCEL","GEOPIN",
+  "RECORD","RECORD_NO","RECORDNO","RECNO"];
 const LEGAL_FIELDS = ["LEGAL","LEGAL_DESC","LEGALDESC","LEGAL_DESCRIPTION","LEGALDESCR","LEGAL1"];
 const ACRE_FIELDS = ["DEEDED_ACRE","DEEDED_ACRES","DEEDEDACRES","LEGAL_ACRE","LEGAL_ACRES","ACRES","DEED_ACRES","GIS_ACRES","CALC_ACRES"];
 const OWNER_FIELDS = ["OWNER1","OWNER","OWNER_NAME","OWNERNAME","OWNER_1","OWN_NAME","NAME1"];
@@ -213,37 +214,73 @@ function sourceOf(county) {
   return null;
 }
 
-// Pick the parcel polygon layer out of a service's layer list.
+// Pick the parcel polygon layer out of a service's layer list (skips group layers, lines, labels, sales).
 function parcelLayerId(layers, county) {
   const ok = (layers || []).filter(l =>
-    /parcel/i.test(l.name) && !/sale|plat|label|anno|point|text|line/i.test(l.name) &&
+    /parcel|ownership|cadastr/i.test(l.name) && !/sale|plat|label|anno|point|text|line|dimension|lot ?line|hook/i.test(l.name) &&
     !(l.subLayerIds && l.subLayerIds.length) &&
     (!l.geometryType || /polygon/i.test(l.geometryType)));
-  const nm = l => l.name.trim().toLowerCase();
+  const nm = l => l.name.trim().toLowerCase().replace(/[_\s]+/g, " ");
   const best = ok.find(l => nm(l) === "parcels" || nm(l) === "parcel")
-            || ok.find(l => nm(l) === `${county.toLowerCase()} parcels`)
+            || ok.find(l => nm(l).startsWith(county.toLowerCase()) && /parcel/.test(nm(l)))
+            || ok.find(l => /parcel/.test(nm(l)))
             || ok[0];
   return best ? best.id : null;
 }
+const layerNames = layers => (layers || []).map(l => l.name).join(", ") || "(none)";
+
+// Fallback field matching when the exact-name lists miss.
+function fuzzy(fields, re, not) { return fields.find(f => re.test(f) && !(not && not.test(f))) || null; }
+const NOT_OWNER = /addr|stre|city|state|_st$|zip|occ|add_?l|type|school|sub|twp|town|road|street|file|mail|code|date/i;
 
 async function layerCfg(svcUrl, id, src, county, over = {}) {
-  const info = await arc(`${svcUrl}/${id}`);
+  const layer = `${svcUrl}/${id}`;
+  const info = await arc(layer);
   const fdef = info.fields || [];
   const fields = fdef.map(f => f.name);
+  if (!fields.length) throw new Error(`layer "${info.name}" has no readable fields`);
   const type = Object.fromEntries(fdef.map(f => [f.name, f.type]));
   const has = f => f && fields.includes(f) ? f : null;
   const isNum = f => /Integer|Double|Single/.test(type[f] || "");
-  const idf = has(over.id) || pick(fields, ID_FIELDS);
-  if (!idf) throw new Error(`${county} County parcel layer found, but no parcel ID field. Fields: ${fields.join(", ")}`);
+  // ID: first candidate field that actually holds values (Butte has an empty parcel_id)
+  let idCands = over.id ? [has(over.id)].filter(Boolean) : [];
+  if (!idCands.length) idCands = [...new Set(ID_FIELDS.map(c => pick(fields, [c])).filter(Boolean))];
+  if (!idCands.length) { const fz = fuzzy(fields, /parcel|pin$|record/i, /area|length|acre|sale|plat|link|url|date/i); if (fz) idCands = [fz]; }
+  if (!idCands.length) throw new Error(`${county}: layer "${info.name}" has no parcel ID field. Fields: ${fields.join(", ")}`);
+  let idf = idCands[0];
+  if (idCands.length > 1) {
+    try {
+      const s = await arc(layer + "/query", { where: "1=1", outFields: idCands.join(","), returnGeometry: false, resultRecordCount: 25 });
+      const feats = (s.features || []).slice(0, 200);
+      const filled = f => feats.filter(ft => { const v = String(ft.attributes[f] ?? "").trim(); return v && !/^0*$/.test(v); }).length;
+      idf = idCands.reduce((best, f) => filled(f) > filled(best) ? f : best, idCands[0]);
+    } catch (e) { /* keep first candidate */ }
+  }
   const also = (over.also || []).map(has).filter(Boolean).map(f => ({ f, numeric: isNum(f) }));
+  const acres = has(over.acres) || pick(fields, ACRE_FIELDS)
+    || fuzzy(fields, /deed.*ac|legal.*ac/i) || fuzzy(fields, /acre|^ac$|_ac$|acres?_/i, /till|crop|pct|percent/i);
   return {
-    v: 2, src, layer: `${svcUrl}/${id}`, layerName: info.name,
+    v: 3, src, layer, layerName: info.name, fields,
     id: idf, idNumeric: isNum(idf), also,
     alt: idf === "RECORD" ? pick(fields, ["RECORD_1"]) : null,      // First District keeps a numeric copy
-    legal: has(over.legal) || pick(fields, LEGAL_FIELDS),
-    acres: has(over.acres) || pick(fields, ACRE_FIELDS),
-    owner: has(over.owner) || pick(fields, OWNER_FIELDS)
+    legal: has(over.legal) || pick(fields, LEGAL_FIELDS) || fuzzy(fields, /legal|descr/i, /acre|_ac$|date|code/i),
+    acres,
+    owner: has(over.owner) || pick(fields, OWNER_FIELDS) || fuzzy(fields, /owner|own_?nam|ownnam|taxpayer|grantee/i, NOT_OWNER)
   };
+}
+
+// Try each candidate service; return the first parcel layer that configures. Errors say what was seen.
+async function firstParcelLayer(services, county, src) {
+  const seen = [];
+  for (const { url, label } of services) {
+    let meta;
+    try { meta = await arc(url); } catch (e) { seen.push(`${label}: ${e.message}`); continue; }
+    const id = parcelLayerId(meta.layers, county);
+    if (id === null) { seen.push(`${label} [${layerNames(meta.layers)}]`); continue; }
+    try { return await layerCfg(url, id, src, county); }
+    catch (e) { seen.push(`${label}: ${e.message}`); }
+  }
+  throw new Error(`No parcel layer found for ${county} on ${src}. Checked: ${seen.join(" | ") || "no matching services"}`);
 }
 
 let d3Root = null;
@@ -251,49 +288,59 @@ async function discoverD3(name) {
   const tag = (name === "Tripp" || name === "Todd") ? "TRIPP_TODD" : name.toUpperCase().replace(/ /g, "_");
   if (!d3Root) d3Root = arc(D3).catch(e => { d3Root = null; throw e; });
   const root = await d3Root;
-  const cands = (root.services || []).filter(s => {
-    const n = s.name.toUpperCase();
-    return s.type === "MapServer" && n.startsWith(tag + "_") && n.includes("LAYERS") && !n.includes("FSA");
-  }).map(s => s.name);
-  const yr = n => parseInt(n.slice(-2).replace(/\D/g, "") || "0", 10);
-  cands.sort((a, b) => (a.toUpperCase().includes("WEB") ? 0 : 1) - (b.toUpperCase().includes("WEB") ? 0 : 1) || yr(b) - yr(a));
-  for (const svc of cands) {
-    const url = `${D3}/${svc}/MapServer`;
-    const meta = await arc(url);
-    const lyr = (meta.layers || []).find(l => l.name.trim().toLowerCase() === "parcels");
-    if (!lyr) continue;
-    try { return await layerCfg(url, lyr.id, "District III GIS", name); } catch (e) { continue; }
+  let svcs = [...(root.services || [])];
+  // county services may also sit in a folder named for the county
+  for (const f of (root.folders || []).filter(f => f.toUpperCase().replace(/ /g, "_").includes(tag))) {
+    try { svcs.push(...((await arc(`${D3}/${f}`)).services || [])); } catch (e) {}
   }
-  throw new Error(`No parcel layer found for ${name} County on District III.`);
+  const mine = svcs.filter(s => {
+    const n = s.name.toUpperCase().split("/").pop();
+    return /MapServer|FeatureServer/.test(s.type) && (n.startsWith(tag + "_") || n === tag)
+      && !/FSA|LOCATOR|IMAGE|ORTHO|NAIP|GEOCOD/.test(n);
+  });
+  const score = n => (/LAYERS/i.test(n) ? 0 : 2) + (/WEB/i.test(n) ? 0 : 1);
+  const yr = n => parseInt(n.slice(-2).replace(/\D/g, "") || "0", 10);
+  mine.sort((a, b) => score(a.name) - score(b.name) || yr(b.name) - yr(a.name) || (a.type === "MapServer" ? 0 : 1) - (b.type === "MapServer" ? 0 : 1));
+  if (!mine.length) throw new Error(`No ${tag}_ services on District III.`);
+  return firstParcelLayer(mine.map(s => ({ url: `${D3}/${s.name}/${s.type}`, label: s.name })), name, "District III GIS");
 }
 
 async function discoverFD(name) {
   const folder = await arc(`${FD}/${encodeURIComponent(name)}`);
   const svcs = (folder.services || []).filter(s => /FeatureServer|MapServer/.test(s.type));
-  // the MapNet service first, FeatureServer before MapServer
   svcs.sort((a, b) => (/mapnet/i.test(a.name) ? 0 : 1) - (/mapnet/i.test(b.name) ? 0 : 1)
                    || (a.type === "FeatureServer" ? 0 : 1) - (b.type === "FeatureServer" ? 0 : 1));
-  for (const s of svcs) {
-    const url = `${FD}/${s.name}/${s.type}`;
-    const meta = await arc(url);
-    const id = parcelLayerId(meta.layers, name);
-    if (id === null) continue;
-    return await layerCfg(url, id, "First District GIS", name);
+  return firstParcelLayer(svcs.map(s => ({ url: `${FD}/${s.name}/${s.type}`, label: s.name })), name, "First District GIS");
+}
+
+// Whole county server: scan its services (and folders) for a parcel layer.
+async function scanServer(root, county, src) {
+  const top = await arc(root);
+  let svcs = [...(top.services || [])];
+  for (const f of (top.folders || []).slice(0, 20)) {
+    if (/^(utilities|system|basemaps?|hosted|imagery|elevation|locators?|geocod|printing|test)/i.test(f)) continue;
+    try { svcs.push(...((await arc(`${root}/${f}`)).services || [])); } catch (e) {}
   }
-  throw new Error(`No parcel layer found for ${name} County on First District GIS.`);
+  svcs = svcs.filter(s => /MapServer|FeatureServer/.test(s.type) && !/locator|geocod|imagery|ortho|aerial|print/i.test(s.name));
+  const score = n => /parcel/i.test(n) ? 0 : /tax|propert|owner|cadast|assess|equaliz|land/i.test(n) ? 1 : /public|county|web|general|map|base/i.test(n) ? 2 : 3;
+  svcs.sort((a, b) => score(a.name) - score(b.name));
+  return firstParcelLayer(svcs.slice(0, 25).map(s => ({ url: `${root}/${s.name}/${s.type}`, label: s.name })), county, src);
 }
 
 async function discoverSingle(name) {
-  const { url, src, fields } = SINGLE[name];
-  const meta = await arc(url);
-  const id = parcelLayerId(meta.layers, name);
-  if (id === null) throw new Error(`No parcel layer found on ${src}. Layers: ${(meta.layers || []).map(l => l.name).join(", ")}`);
-  return await layerCfg(url, id, src, name, fields || {});
+  const { url, root, src, fields } = SINGLE[name];
+  if (url) {
+    const meta = await arc(url);
+    const id = parcelLayerId(meta.layers, name);
+    if (id !== null) return await layerCfg(url, id, src, name, fields || {});
+    if (!root) throw new Error(`No parcel layer on ${src}. Layers: ${layerNames(meta.layers)}`);
+  }
+  return scanServer(root, name, src);
 }
 
 async function countyCfg(name, fresh = false) {
-  const key = "si.cfg2." + name;
-  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 2) return c; } catch (e) {} }
+  const key = "si.cfg3." + name;
+  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 3) return c; } catch (e) {} }
   const src = sourceOf(name);
   const cfg = src === "d3" ? await discoverD3(name) : src === "fd" ? await discoverFD(name) : await discoverSingle(name);
   try { localStorage.setItem(key, JSON.stringify(cfg)); } catch (e) {}
@@ -601,7 +648,7 @@ async function sampleParcel(cfg) {
   let ps = [];
   try {
     ps = toParcels(cfg, await arc(cfg.layer + "/query",
-      { where: "1=1", outFields: "*", returnGeometry: true, outSR: 4326, resultRecordCount: 5 }));
+      { where: "1=1", outFields: "*", returnGeometry: true, outSR: 4326, resultRecordCount: 10 }));
   } catch (e) { ps = []; }
   if (!ps.length) {
     const ids = await arc(cfg.layer + "/query", { where: "1=1", returnIdsOnly: true });
@@ -610,8 +657,20 @@ async function sampleParcel(cfg) {
     ps = toParcels(cfg, await arc(cfg.layer + "/query",
       { objectIds: oids.join(","), outFields: "*", returnGeometry: true, outSR: 4326 }));
   }
-  if (!ps.length) throw new Error(`sample parcels have no value in ID field ${cfg.id}`);
-  return ps[0];
+  if (!ps.length) throw new Error(`sample parcels have no value in ID field ${cfg.id}. Fields: ${(cfg.fields || []).join(", ")}`);
+  // prefer a real-looking parcel: non-zero ID, has an owner
+  return ps.find(p => !/^0*$/.test(p.id) && p.owner) || ps.find(p => !/^0*$/.test(p.id)) || ps[0];
+}
+
+function interiorPoint(p) {
+  const b = boundsOf([p]);
+  const c = b.getCenter();
+  if (relation({ lat: c.lat, lng: c.lng }, [p]).inside) return { lat: c.lat, lng: c.lng };
+  for (let i = 1; i < 8; i++) for (let j = 1; j < 8; j++) {
+    const pt = { lat: b.getSouth() + (b.getNorth() - b.getSouth()) * i / 8, lng: b.getWest() + (b.getEast() - b.getWest()) * j / 8 };
+    if (relation(pt, [p]).inside) return pt;
+  }
+  return null;
 }
 
 async function testCounty(name) {
@@ -624,15 +683,16 @@ async function testCounty(name) {
     const p = await sampleParcel(cfg);
     const byId = await parcelsByIds(cfg, [p.id]);
     if (!byId.some(x => normId(x.id) === normId(p.id))) throw new Error(`lookup by ID ${p.id} found nothing (field ${cfg.id})`);
-    const c = boundsOf([p]).getCenter();
-    if (relation({ lat: c.lat, lng: c.lng }, [p]).inside) {
-      const at = await parcelAt(cfg, c.lat, c.lng);
+    const pt = interiorPoint(p);
+    if (pt) {
+      const at = await parcelAt(cfg, pt.lat, pt.lng);
       if (!at.length) warn.push("tap lookup found nothing");
       else if (!at.some(x => x.id === p.id)) warn.push(`tap lookup returned ${at[0].id}, not ${p.id}`);
-    } else warn.push("tap check skipped (irregular sample)");
+    }
     const missing = ["owner", "legal", "acres"].filter(k => !cfg[k]);
-    if (missing.length) warn.push("no " + missing.join("/") + " field");
-    r.notes.push(`ID field ${cfg.id}, sample ${p.id}` + (p.owner ? `, owner ${p.owner}` : ""), ...warn);
+    if (missing.length) warn.push(`no ${missing.join("/")} field. Fields: ${(cfg.fields || []).join(", ")}`);
+    r.notes.push(`layer "${cfg.layerName}", ID ${cfg.id}, sample ${p.id}` + (p.owner ? `, owner ${p.owner}` : "")
+      + `; owner=${cfg.owner || "-"} legal=${cfg.legal || "-"} acres=${cfg.acres || "-"}`, ...warn);
     r.status = warn.length ? "WARN" : "PASS";
   } catch (e) {
     r.notes.push(e.message || String(e));
