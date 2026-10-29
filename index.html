@@ -88,7 +88,21 @@
   .actions { display: flex; gap: 6px; margin-top: 12px; }
   .actions > * { flex: 1 1 0; font-weight: 600; }
   .status { margin-top: 8px; font-size: 14px; color: var(--muted); min-height: 1.2em; }
-  .status.err { color: var(--bad); }
+.status.err { color: var(--bad); }
+  .testlink { display: inline-block; margin-top: 6px; font-size: 14px; color: var(--muted); }
+  .testpanel { position: fixed; inset: 0; z-index: 2000; overflow-y: auto; background: var(--panel); color: var(--ink);
+    padding: calc(env(safe-area-inset-top, 0px) + 14px) 14px calc(env(safe-area-inset-bottom, 0px) + 20px); box-sizing: border-box; }
+  .testpanel h1 { font-family: "Barlow Semi Condensed", Barlow, sans-serif; font-size: 28px; margin: 0 0 4px; }
+  .testpanel .summary { color: var(--muted); margin-bottom: 10px; }
+  .testpanel .tbtns { display: flex; gap: 6px; margin-bottom: 12px; }
+  .testpanel .tbtns > * { flex: 1 1 0; font-weight: 600; }
+  .trow { display: grid; grid-template-columns: 4.2em 1fr; gap: 2px 10px; padding: 8px 0; border-top: 1px solid var(--line); }
+  .trow .st { font-weight: 700; }
+  .trow .st.PASS { color: var(--good); }
+  .trow .st.FAIL { color: var(--bad); }
+  .trow .st.WARN { color: #c77700; }
+  .trow .nm { font-weight: 600; }
+  .trow .nt { grid-column: 2; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 
   .leaflet-top { top: calc(env(safe-area-inset-top, 0px) + 66px); }
   .leaflet-bottom { bottom: var(--sheet-h, 0px); }
@@ -120,6 +134,7 @@
     <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
   </div>
   <div class="status" id="status"></div>
+  <a class="testlink" href="?test=1">Run county self-test</a>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -231,9 +246,11 @@ async function layerCfg(svcUrl, id, src, county, over = {}) {
   };
 }
 
+let d3Root = null;
 async function discoverD3(name) {
   const tag = (name === "Tripp" || name === "Todd") ? "TRIPP_TODD" : name.toUpperCase().replace(/ /g, "_");
-  const root = await arc(D3);
+  if (!d3Root) d3Root = arc(D3).catch(e => { d3Root = null; throw e; });
+  const root = await d3Root;
   const cands = (root.services || []).filter(s => {
     const n = s.name.toUpperCase();
     return s.type === "MapServer" && n.startsWith(tag + "_") && n.includes("LAYERS") && !n.includes("FSA");
@@ -274,9 +291,9 @@ async function discoverSingle(name) {
   return await layerCfg(url, id, src, name, fields || {});
 }
 
-async function countyCfg(name) {
+async function countyCfg(name, fresh = false) {
   const key = "si.cfg2." + name;
-  try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 2) return c; } catch (e) {}
+  if (!fresh) { try { const c = JSON.parse(localStorage.getItem(key)); if (c && c.v === 2) return c; } catch (e) {} }
   const src = sourceOf(name);
   const cfg = src === "d3" ? await discoverD3(name) : src === "fd" ? await discoverFD(name) : await discoverSingle(name);
   try { localStorage.setItem(key, JSON.stringify(cfg)); } catch (e) {}
@@ -577,6 +594,107 @@ if (q.get("county")) {
   if (c) sel.value = c;
 }
 if (q.get("pid")) { $("pid").value = q.get("pid"); findSale(q.get("label") || ""); }
+// ---------------- county self-test (?test=1) ----------------
+// For each county: discover the parcel layer, pull a sample parcel, look it up
+// again by its ID, then check a tap at its centre finds the same parcel.
+async function sampleParcel(cfg) {
+  let ps = [];
+  try {
+    ps = toParcels(cfg, await arc(cfg.layer + "/query",
+      { where: "1=1", outFields: "*", returnGeometry: true, outSR: 4326, resultRecordCount: 5 }));
+  } catch (e) { ps = []; }
+  if (!ps.length) {
+    const ids = await arc(cfg.layer + "/query", { where: "1=1", returnIdsOnly: true });
+    const oids = (ids.objectIds || []).slice(0, 25);
+    if (!oids.length) throw new Error("parcel layer returned no features");
+    ps = toParcels(cfg, await arc(cfg.layer + "/query",
+      { objectIds: oids.join(","), outFields: "*", returnGeometry: true, outSR: 4326 }));
+  }
+  if (!ps.length) throw new Error(`sample parcels have no value in ID field ${cfg.id}`);
+  return ps[0];
+}
+
+async function testCounty(name) {
+  const r = { county: name, src: "", status: "FAIL", notes: [], ms: 0 };
+  const t0 = performance.now();
+  try {
+    const cfg = await countyCfg(name, true);
+    r.src = cfg.src;
+    const warn = [];
+    const p = await sampleParcel(cfg);
+    const byId = await parcelsByIds(cfg, [p.id]);
+    if (!byId.some(x => normId(x.id) === normId(p.id))) throw new Error(`lookup by ID ${p.id} found nothing (field ${cfg.id})`);
+    const c = boundsOf([p]).getCenter();
+    if (relation({ lat: c.lat, lng: c.lng }, [p]).inside) {
+      const at = await parcelAt(cfg, c.lat, c.lng);
+      if (!at.length) warn.push("tap lookup found nothing");
+      else if (!at.some(x => x.id === p.id)) warn.push(`tap lookup returned ${at[0].id}, not ${p.id}`);
+    } else warn.push("tap check skipped (irregular sample)");
+    const missing = ["owner", "legal", "acres"].filter(k => !cfg[k]);
+    if (missing.length) warn.push("no " + missing.join("/") + " field");
+    r.notes.push(`ID field ${cfg.id}, sample ${p.id}` + (p.owner ? `, owner ${p.owner}` : ""), ...warn);
+    r.status = warn.length ? "WARN" : "PASS";
+  } catch (e) {
+    r.notes.push(e.message || String(e));
+  }
+  r.ms = Math.round(performance.now() - t0);
+  return r;
+}
+
+async function runSelfTest() {
+  const panel = document.createElement("section");
+  panel.className = "testpanel";
+  panel.innerHTML = `<h1>County self-test</h1><div class="summary" id="tsum">Starting…</div>
+    <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
+    <div id="trows"></div>`;
+  document.body.appendChild(panel);
+  const rows = {};
+  for (const c of COUNTIES) {
+    const d = document.createElement("div");
+    d.className = "trow";
+    d.innerHTML = `<span class="st">…</span><span class="nm">${esc(c)}</span><span class="nt"></span>`;
+    $("trows").appendChild(d);
+    rows[c] = d;
+  }
+  const results = [], queue = [...COUNTIES];
+  const tally = () => {
+    const n = k => results.filter(r => r.status === k).length;
+    $("tsum").textContent = `${results.length} of ${COUNTIES.length} done: ${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail`
+      + (transport === "jsonp" ? " (fallback route in use)" : "");
+  };
+  async function worker() {
+    while (queue.length) {
+      const c = queue.shift();
+      rows[c].querySelector(".st").textContent = "…";
+      const r = await testCounty(c);
+      results.push(r);
+      const st = rows[c].querySelector(".st");
+      st.textContent = r.status; st.className = "st " + r.status;
+      rows[c].querySelector(".nm").textContent = `${c}` + (r.src ? ` (${r.src})` : "");
+      rows[c].querySelector(".nt").textContent = r.notes.join("; ") + `  [${(r.ms / 1000).toFixed(1)} s]`;
+      tally();
+    }
+  }
+  await Promise.all([worker(), worker(), worker(), worker()]);
+  // failures first in the copied text
+  const order = { FAIL: 0, WARN: 1, PASS: 2 };
+  const text = `Sale Inspector self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+    + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
+        .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
+  const btn = $("tcopy");
+  btn.disabled = false;
+  btn.onclick = async () => {
+    try { await navigator.clipboard.writeText(text); btn.textContent = "Copied"; }
+    catch (e) {
+      const ta = document.createElement("textarea");
+      ta.value = text; ta.style.cssText = "width:100%;height:40vh;margin-top:10px";
+      panel.insertBefore(ta, $("trows")); ta.select();
+      btn.textContent = "Select all and copy below";
+    }
+  };
+}
+
+if (q.get("test")) runSelfTest();
 update();
 </script>
 </body>
