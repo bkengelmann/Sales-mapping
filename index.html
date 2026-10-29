@@ -134,7 +134,7 @@
     <a id="nav" class="btn" target="_blank" rel="noopener" aria-disabled="true">Directions</a>
   </div>
   <div class="status" id="status"></div>
-  <a class="testlink" href="?test=1">Run county self-test</a>
+  <a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.3</span>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -704,7 +704,7 @@ async function testCounty(name) {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test</h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.3</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
@@ -738,7 +738,7 @@ async function runSelfTest() {
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
   const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const text = `Sale Inspector v0.3 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
