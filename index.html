@@ -158,14 +158,14 @@
   </div>
   </div>
   <div class="status" id="status"></div>
-  <div class="foot"><a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.9</span></div>
+  <div class="foot"><a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.10</span></div>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.9 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.10 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
 // ---------------------------------------------------------------------------
@@ -694,32 +694,47 @@ function setSale(parcels, label) {
 }
 
 // ---------------- actions ----------------
-// ---------------- PLSS (BLM national cadastral; works in every county) ----------------
+// ---------------- PLSS (sections and townships; works in every county) ----------------
+// PLSS_SOURCE picks the server: "GFP" = SD Game, Fish and Parks, "BLM" = BLM national cadastral.
+// To switch back to BLM, change "GFP" to "BLM". PLSS_FALLBACK retries on BLM if GFP errors or finds nothing.
+const PLSS_SOURCE = "GFP";
+const PLSS_FALLBACK = true;
+
 const PLSS = "https://gis.blm.gov/arcgis/rest/services/Cadastral/BLM_Natl_PLSS_CadNSDI/MapServer";
 const PLSS_TWP_LAYER = 1, PLSS_SEC_LAYER = 2;
-const MERIDIAN = { "05": "5th PM", "07": "Black Hills Mer." };
+const MERIDIAN = { "05": "5th PM", "06": "6th PM", "07": "Black Hills Mer." };
+const GFP_PLSS = "https://ert.gfp.sd.gov/arcgis/rest/services/SD_Public/ReferenceLayers_CountiesPLSS/MapServer";
+const GFP_TWP_LAYER = 1, GFP_SEC_LAYER = 2;   // townships: TWPDRNGD like "1S 11E"; sections: TWP, RNG, SEC (no direction)
 
 // "6-98-50", "6 98 50", "S6 T98N R50W", "Sec 6, T98N, R50W" -> section; "T98N R50W" -> township
+// tdirSet / rdirSet say whether the direction was typed (GFP searches both ways when it wasn't).
 function parsePLSS(text) {
   const t = text.trim().toUpperCase().replace(/\bSEC(TION)?\b\.?|\bTWP\b\.?|\bRGE\b\.?|\bRNG\b\.?/g, " ").replace(/\s+/g, " ").trim();
   let m = t.match(/^S?\s*(\d{1,2})\s*[-\s,\/]+\s*T?\s*(\d{1,3})\s*([NS])?\s*[-\s,\/]+\s*R?\s*(\d{1,3})\s*([EW])?$/);
   if (m) {
     const sec = +m[1], twp = +m[2], rng = +m[4];
     if (sec < 1 || sec > 36 || twp < 1 || twp > 130 || rng < 1 || rng > 110) return null;
-    return { sec, twp, tdir: m[3] || "N", rng, rdir: m[5] || "W" };
+    return { sec, twp, tdir: m[3] || "N", rng, rdir: m[5] || "W", tdirSet: !!m[3], rdirSet: !!m[5] };
   }
   m = t.match(/^T\s*(\d{1,3})\s*([NS])?\s*[-\s,\/]*\s*R\s*(\d{1,3})\s*([EW])?$/);
-  if (m) return { sec: null, twp: +m[1], tdir: m[2] || "N", rng: +m[3], rdir: m[4] || "W" };
+  if (m) return { sec: null, twp: +m[1], tdir: m[2] || "N", rng: +m[3], rdir: m[4] || "W", tdirSet: !!m[2], rdirSet: !!m[4] };
   return null;
 }
+// Label from numbers and directions. Meridian is "05" etc. from BLM, or inferred from the numbers for GFP:
+// SD's 5th PM townships are T90N and up, 6th PM (south-central SD) about T35N-T46N with W ranges, the rest Black Hills.
+function plssLabel(twp, tdir, rng, rdir, sec, mer) {
+  if (!mer && tdir) mer = tdir === "S" || rdir === "E" ? "07" : twp >= 90 ? "05" : twp >= 30 ? "06" : "07";
+  const std = tdir === "N" && rdir === "W" && mer === "05";
+  const short = std || !tdir ? `${sec ? +sec + "-" : ""}${twp}-${rng}` : `${sec ? +sec + "-" : ""}${twp}${tdir}-${rng}${rdir}`;
+  const long = `${sec ? `Sec ${+sec}, ` : ""}T${twp}${tdir || ""}, R${rng}${rdir || ""}`
+    + (!tdir ? " (direction unknown)" : MERIDIAN[mer] ? `, ${MERIDIAN[mer]}` : "");
+  return { short, long };
+}
+
+// ---- BLM version ----
 // PLSSID: SD + meridian(2) + twp(3)+frac + dir + rng(3)+frac + dir + dup, e.g. SD050980N0500W0
 function plssName(plssid, sec) {
-  const twp = +plssid.slice(4, 7), tdir = plssid[8], rng = +plssid.slice(9, 12), rdir = plssid[13];
-  const mer = MERIDIAN[plssid.slice(2, 4)];
-  const std = tdir === "N" && rdir === "W" && plssid.slice(2, 4) === "05";
-  const short = std ? `${sec ? +sec + "-" : ""}${twp}-${rng}` : `${sec ? +sec + "-" : ""}${twp}${tdir}-${rng}${rdir}`;
-  const long = `${sec ? `Sec ${+sec}, ` : ""}T${twp}${tdir}, R${rng}${rdir}` + (mer ? `, ${mer}` : "");
-  return { short, long };
+  return plssLabel(+plssid.slice(4, 7), plssid[8], +plssid.slice(9, 12), plssid[13], sec, plssid.slice(2, 4));
 }
 function plssToParcels(data, isSec) {
   return (data.features || []).filter(f => f.geometry && f.geometry.rings).map(f => {
@@ -729,7 +744,7 @@ function plssToParcels(data, isSec) {
              rings: f.geometry.rings, plss: true, short: n.short };
   });
 }
-async function plssFind(p) {
+async function blmFind(p) {
   const pad = n => String(n).padStart(3, "0");
   const like = `SD__${pad(p.twp)}0${p.tdir}${pad(p.rng)}0${p.rdir}%`;
   if (p.sec) {
@@ -740,10 +755,71 @@ async function plssFind(p) {
   return plssToParcels(await arc(`${PLSS}/${PLSS_TWP_LAYER}/query`, { where: `PLSSID LIKE '${like}'`,
     outFields: "PLSSID", returnGeometry: true, outSR: 4326 }), false);
 }
-async function plssAt(lat, lng) {
+async function blmAt(lat, lng) {
   return plssToParcels(await arc(`${PLSS}/${PLSS_SEC_LAYER}/query`, { geometry: `${lng},${lat}`, geometryType: "esriGeometryPoint",
     inSR: 4326, spatialRel: "esriSpatialRelIntersects", outFields: "PLSSID,FRSTDIVNO", returnGeometry: true, outSR: 4326 }), true);
 }
+
+// ---- GFP version ----
+// Sections carry only TWP/RNG/SEC numbers, so in the Black Hills one number set can match up to four sections
+// (T1N or T1S, R1E or R1W). Each section is matched to the township polygon it sits in, which carries N/S and E/W.
+function gfpTwp(f) {
+  const raw = String((f.attributes || {}).TWPDRNGD || "").trim().toUpperCase();
+  const m = raw.match(/^(\d+)\s*([NS])\s*(\d+)\s*([EW])$/);
+  return m ? { twp: +m[1], tdir: m[2], rng: +m[3], rdir: m[4], raw, rings: f.geometry && f.geometry.rings } : null;
+}
+function gfpParcel(twp, tdir, rng, rdir, sec, rings) {
+  const n = plssLabel(twp, tdir, rng, rdir, sec);
+  return { id: (sec ? "Sec " : "Twp ") + n.short, src: "GFP PLSS", legal: n.long, owner: "", acres: null,
+           rings, plss: true, short: n.short, ambiguous: !tdir };
+}
+function inTwp(sec, t) {
+  const pt = interiorPoint(sec);
+  return !!(pt && t.rings && relation(pt, [t]).inside);
+}
+async function gfpFind(p) {
+  const tdirs = p.tdirSet === false ? ["N", "S"] : [p.tdir];
+  const rdirs = p.rdirSet === false ? ["W", "E"] : [p.rdir];
+  const keys = tdirs.flatMap(td => rdirs.map(rd => `'${p.twp}${td} ${p.rng}${rd}'`)).join(",");
+  const twps = ((await arc(`${GFP_PLSS}/${GFP_TWP_LAYER}/query`, { where: `TWPDRNGD IN (${keys})`,
+    outFields: "TWPDRNGD", returnGeometry: true, outSR: 4326 })).features || []).map(gfpTwp).filter(t => t && t.rings);
+  if (!p.sec) return twps.map(t => gfpParcel(t.twp, t.tdir, t.rng, t.rdir, null, t.rings));
+  const secs = ((await arc(`${GFP_PLSS}/${GFP_SEC_LAYER}/query`, { where: `TWP = ${p.twp} AND RNG = ${p.rng} AND SEC = ${p.sec}`,
+    outFields: "TWP,RNG,SEC", returnGeometry: true, outSR: 4326 })).features || []).filter(f => f.geometry && f.geometry.rings);
+  const out = [];
+  for (const f of secs) {
+    const t = twps.find(t => inTwp({ rings: f.geometry.rings }, t));
+    if (t) out.push(gfpParcel(t.twp, t.tdir, t.rng, t.rdir, p.sec, f.geometry.rings));
+  }
+  // no township polygon matched: show every numeric match, marked as direction unknown, rather than guess
+  if (!out.length && !twps.length && !p.tdirSet && !p.rdirSet) for (const f of secs) out.push(gfpParcel(p.twp, null, p.rng, null, p.sec, f.geometry.rings));
+  return out;
+}
+async function gfpAt(lat, lng) {
+  const q = { geometry: `${lng},${lat}`, geometryType: "esriGeometryPoint", inSR: 4326,
+              spatialRel: "esriSpatialRelIntersects", returnGeometry: true, outSR: 4326 };
+  const [s, t] = await Promise.all([
+    arc(`${GFP_PLSS}/${GFP_SEC_LAYER}/query`, { ...q, outFields: "TWP,RNG,SEC" }),
+    arc(`${GFP_PLSS}/${GFP_TWP_LAYER}/query`, { ...q, outFields: "TWPDRNGD", returnGeometry: false }).catch(() => ({ features: [] }))]);
+  const twp = (t.features || []).map(gfpTwp).find(Boolean);
+  return (s.features || []).filter(f => f.geometry && f.geometry.rings).map(f => {
+    const a = f.attributes || {};
+    const d = twp && twp.twp === a.TWP && twp.rng === a.RNG ? twp : null;
+    return gfpParcel(a.TWP, d && d.tdir, a.RNG, d && d.rdir, a.SEC, f.geometry.rings);
+  });
+}
+
+// ---- the two the app calls ----
+async function viaSource(gfp, blm) {
+  if (PLSS_SOURCE === "BLM") return blm();
+  try {
+    const r = await gfp();
+    if (r.length || !PLSS_FALLBACK) return r;
+  } catch (e) { if (!PLSS_FALLBACK) throw e; }
+  return blm();   // results from here are tagged src "BLM PLSS"
+}
+const plssFind = p => viaSource(() => gfpFind(p), () => blmFind(p));
+const plssAt = (lat, lng) => viaSource(() => gfpAt(lat, lng), () => blmAt(lat, lng));
 
 async function findSale(label) {
   const county = $("county").value;
@@ -760,6 +836,10 @@ async function findSale(label) {
       setStatus("");
       setSale(found, label);
       $("pid").value = raw;
+      const what = pp.sec ? "sections" : "townships";
+      if (found.some(f => f.ambiguous)) setStatus(`GFP gave no N/S or E/W for ${raw}; ${found.length} ${what} match. Type directions, e.g. 1-1S-1E.`, true);
+      else if (found.length > 1) setStatus(`${found.length} ${what} match ${raw}: ${found.map(f => f.short).join(", ")}. Add N/S and E/W to pick one.`, true);
+      else if (PLSS_SOURCE === "GFP" && found[0].src === "BLM PLSS") setStatus("Found on BLM (Game, Fish and Parks found nothing or didn’t answer).", true);
     } catch (e) { setStatus(e.message, true); }
     finally { btn.disabled = false; btn.textContent = "Find"; }
     return;
@@ -957,19 +1037,40 @@ async function testCounty(name) {
   return r;
 }
 
+const PLSS_TEST = `PLSS ${PLSS_SOURCE}`;
+// Tests the active source with no fallback, so a GFP failure shows as a failure.
 async function testPLSS() {
-  const r = { county: "BLM PLSS", src: "BLM", status: "FAIL", notes: [], ms: 0 };
+  const r = { county: PLSS_TEST, src: PLSS_SOURCE, status: "FAIL", notes: [], ms: 0 };
   const t0 = performance.now();
+  const find = PLSS_SOURCE === "GFP" ? gfpFind : blmFind, at = PLSS_SOURCE === "GFP" ? gfpAt : blmAt;
+  const P = (sec, twp, tdir, rng, rdir) => ({ sec, twp, tdir, rng, rdir, tdirSet: true, rdirSet: true });
   try {
-    const s = await plssFind({ sec: 6, twp: 98, tdir: "N", rng: 50, rdir: "W" });
+    const s = await find(P(6, 98, "N", 50, "W"));
     if (!s.length) throw new Error("section 6-98-50 not found");
     const pt = interiorPoint(s[0]);
-    const at = pt ? await plssAt(pt.lat, pt.lng) : [];
-    const t = await plssFind({ sec: null, twp: 98, tdir: "N", rng: 50, rdir: "W" });
+    const atS = pt ? await at(pt.lat, pt.lng) : [];
+    const t = await find(P(null, 98, "N", 50, "W"));
     const warn = [];
-    if (!at.some(x => x.id === s[0].id)) warn.push("section-at-point check failed");
+    if (!atS.some(x => x.id === s[0].id)) warn.push("section-at-point check failed");
     if (!t.length) warn.push("township search failed");
-    r.notes.push(`found ${s[0].legal}`, ...warn);
+    r.notes.push(`found ${s[0].legal}`);
+    // Black Hills: T1N and T1S share numbers either side of the baseline; each must come back as its own section
+    const n = await find(P(1, 1, "N", 1, "E")), so = await find(P(1, 1, "S", 1, "E"));
+    if (n.length !== 1 || so.length !== 1) warn.push(`Black Hills 1-1N-1E gave ${n.length}, 1-1S-1E gave ${so.length} (want 1 each)`);
+    else {
+      const cn = boundsOf(n).getCenter(), cs = boundsOf(so).getCenter();
+      if (!(cn.lat > cs.lat + 0.03)) warn.push("Black Hills 1-1N-1E is not north of 1-1S-1E");
+      if (n[0].id !== "Sec 1-1N-1E" || so[0].id !== "Sec 1-1S-1E") warn.push(`Black Hills labels ${n[0].id} / ${so[0].id}`);
+      const ps = interiorPoint(so[0]);
+      const back = ps ? await at(ps.lat, ps.lng) : [];
+      if (!back.some(x => x.id === "Sec 1-1S-1E")) warn.push(`tap in 1-1S-1E read back as ${back.map(x => x.id).join(", ") || "nothing"}`);
+      else r.notes.push("Black Hills N/S split OK");
+    }
+    if (PLSS_SOURCE === "GFP") {   // no directions typed: both sides of the baseline should come back
+      const both = await find({ sec: 1, twp: 1, tdir: "N", rng: 1, rdir: "W", tdirSet: false, rdirSet: false });
+      if (both.length < 2) warn.push(`untyped 1-1-1 gave ${both.length} (want 2+)`);
+    }
+    r.notes.push(...warn);
     r.status = warn.length ? "WARN" : "PASS";
   } catch (e) { r.notes.push(e.message || String(e)); }
   r.ms = Math.round(performance.now() - t0);
@@ -979,19 +1080,19 @@ async function testPLSS() {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.9</small></h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.10</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
   const rows = {};
-  for (const c of [...COUNTIES, "BLM PLSS"]) {
+  for (const c of [...COUNTIES, PLSS_TEST]) {
     const d = document.createElement("div");
     d.className = "trow";
     d.innerHTML = `<span class="st">…</span><span class="nm">${esc(c)}</span><span class="nt"></span>`;
     $("trows").appendChild(d);
     rows[c] = d;
   }
-  const results = [], queue = [...COUNTIES, "BLM PLSS"];
+  const results = [], queue = [...COUNTIES, PLSS_TEST];
   const tally = () => {
     const n = k => results.filter(r => r.status === k).length;
     $("tsum").textContent = `${results.length} of ${COUNTIES.length + 1} done: ${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail`
@@ -1001,7 +1102,7 @@ async function runSelfTest() {
     while (queue.length) {
       const c = queue.shift();
       rows[c].querySelector(".st").textContent = "…";
-      const r = c === "BLM PLSS" ? await testPLSS() : await testCounty(c);
+      const r = c === PLSS_TEST ? await testPLSS() : await testCounty(c);
       results.push(r);
       const st = rows[c].querySelector(".st");
       st.textContent = r.status; st.className = "st " + r.status;
@@ -1013,7 +1114,7 @@ async function runSelfTest() {
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
   const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector v0.9 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const text = `Sale Inspector v0.10 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
