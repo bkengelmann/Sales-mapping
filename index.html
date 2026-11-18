@@ -119,6 +119,7 @@
   .trow .st.PASS { color: var(--good); }
   .trow .st.FAIL { color: var(--bad); }
   .trow .st.WARN { color: #c77700; }
+  .trow .st.LINES { color: var(--muted); }
   .trow .nm { font-weight: 600; }
   .trow .nt { grid-column: 2; color: var(--muted); font-size: 14px; overflow-wrap: anywhere; }
 
@@ -158,24 +159,26 @@
   </div>
   </div>
   <div class="status" id="status"></div>
-  <div class="foot"><a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.10</span></div>
+  <div class="foot"><a class="testlink" href="?test=1">Run county self-test</a> <span class="testlink">· v0.11</span></div>
 </section>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script>
 "use strict";
 // ---------------------------------------------------------------------------
-// Sale Inspector v0.10 — shows where a sale parcel is relative to you.
+// Sale Inspector v0.11 — shows where a sale parcel is relative to you.
 // Parcel sources: District III (same as the DataLog builder), First District
 // (northeast SD), and Minnehaha / Lincoln / Pennington county servers.
+// Counties with none of those get Regrid's free parcel outline tiles (lines only).
 // ---------------------------------------------------------------------------
 const D3 = "https://gis.districtiii.org/server/rest/services";
 const FD = "https://www.1stdistrict.org/arcgis/rest/services";
 const D3_COUNTIES = ["Aurora","Bennett","Bon Homme","Brule","Buffalo","Butte","Campbell","Charles Mix","Davison",
   "Day","Douglas","Faulk","Gregory","Haakon","Hanson","Hughes","Hutchinson","Jackson","Jerauld","Jones","Lyman",
   "Marshall","McPherson","Mellette","Potter","Sanborn","Stanley","Sully","Todd","Tripp","Turner","Ziebach"];
+// Lawrence left out: First District's Lawrence folder is empty (checked Nov 2026).
 const FD_COUNTIES = ["Beadle","Clark","Codington","Deuel","Edmunds","Grant","Hamlin","Hand","Kingsbury",
-  "Lawrence","Miner","Moody","Roberts"];
+  "Miner","Moody","Roberts"];
 const SINGLE = {
   "Minnehaha": { src: "Minnehaha County GIS", url: "https://gis.minnehahacounty.gov/minnemap/rest/services/Parcels/MapServer",
                  fields: { id: "MRRDID", also: ["MAP_ID", "TAG"], owner: "MRTNM1", acres: "TOTAL_ACREAGE", legal: "LEGAL_DESC" } },
@@ -186,6 +189,13 @@ const SINGLE = {
   "Pennington": { src: "Pennington County GIS", root: "https://gis.rcgov.org/server/rest/services" }
 };
 const COUNTIES = [...D3_COUNTIES, ...FD_COUNTIES, ...Object.keys(SINGLE)].sort();
+// No open parcel service: these show Regrid's outline tiles only (no ID, owner, legal or acres).
+// Dates are Regrid's last refresh per its data store, read Nov 18, 2026.
+const OUTLINE_ONLY = { "Brookings": "2025-12", "Brown": "2025-12", "Clay": "2025-12", "Corson": "2026-08",
+  "Custer": "2025-12", "Dewey": "2026-07", "Fall River": "2024-12", "Harding": "2026-07", "Hyde": "2025-12",
+  "Lake": "2025-12", "Lawrence": "2026-08", "McCook": "2025-12", "Meade": "2026-07", "Oglala Lakota": "2026-11",
+  "Perkins": "2023-02", "Spink": "2026-09", "Union": "2025-12", "Walworth": "2025-12", "Yankton": "2025-12" };
+const REGRID_TILES = "https://tiles.arcgis.com/tiles/KzeiCaQsMoeCfoCq/arcgis/rest/services/Regrid_Nationwide_Parcel_Boundaries_v1/MapServer";
 const ID_FIELDS = ["parcel_id","PARCELID","PARCEL","PARCELNO","PARCEL_NO","PARCELNUM","PARCEL_NUM","PARCEL_NUMBER",
   "PARCELNUMBER","PARCEL_NUMB","PARCELNUMB","PRCL_ID","PIN","PID","TAXID","TAX_ID","TAXPARCEL","TAX_PARCEL","GEOPIN",
   "RECORD","RECORD_NO","RECORDNO","RECNO"];
@@ -439,11 +449,28 @@ const streets = L.tileLayer("https://tile.openstreetmap.org/{z}/{x}/{y}.png",
   { maxZoom: 19, attribution: "© OpenStreetMap contributors" });
 const roads = L.tileLayer("https://server.arcgisonline.com/ArcGIS/rest/services/Reference/World_Transportation/MapServer/tile/{z}/{y}/{x}",
   { maxZoom: 19, attribution: "Roads: Esri" });
+// Regrid parcel outlines: PNG tiles exist only at zoom 15-17, stretched beyond that.
+const regrid = L.tileLayer(REGRID_TILES + "/tile/{z}/{y}/{x}",
+  { minZoom: 15, maxNativeZoom: 17, maxZoom: 19, opacity: .9, attribution: "Parcel outlines © Regrid" });
 aerial.addTo(map); roads.addTo(map);
 const countyLines = L.layerGroup(), countyLabels = L.layerGroup();
 const countyOverlay = L.layerGroup([countyLines, countyLabels]).addTo(map);
 L.control.layers({ "Aerial": aerial, "Aerial (USGS)": naip, "Street map": streets },
-  { "Road names": roads, "County lines": countyOverlay }, { position: "topright" }).addTo(map);
+  { "Road names": roads, "County lines": countyOverlay, "Parcel outlines (Regrid)": regrid }, { position: "topright" }).addTo(map);
+// Remember the outline switch; with no choice saved it turns on by itself in an outline-only county.
+let regridChoice = null, regridAuto = false;
+try { regridChoice = localStorage.getItem("si.regrid"); } catch (e) {}
+if (regridChoice === "1") regrid.addTo(map);
+map.on("overlayadd overlayremove", e => {
+  if (e.layer !== regrid || regridAuto) return;   // only a tap on the switch counts as a choice
+  regridChoice = e.type === "overlayadd" ? "1" : "0";
+  try { localStorage.setItem("si.regrid", regridChoice); } catch (err) {}
+});
+function autoRegrid(county) {
+  if (!OUTLINE_ONLY[county] || regridChoice !== null || map.hasLayer(regrid)) return;
+  regridAuto = true;
+  try { regrid.addTo(map); } finally { regridAuto = false; }
+}
 
 const saleLayer = L.layerGroup().addTo(map);
 const tapLayer = L.layerGroup().addTo(map);
@@ -469,9 +496,10 @@ function setCountyShapes(list, detailed) {
     L.polygon(ll, { color: "#000", weight: 4, opacity: .35, fill: false, interactive: false }).addTo(countyLines);
     L.polygon(ll, { color: "#fff", weight: 1.6, opacity: .9, dashArray: "7 5", fill: false, interactive: false }).addTo(countyLines);
     const ok = COUNTIES.includes(c.name);
+    const note = OUTLINE_ONLY[c.name] ? "outlines only" : "no parcel data";
     L.marker([c.label[1], c.label[0]], { interactive: false, keyboard: false,
       icon: L.divIcon({ className: "clabel" + (ok ? "" : " off"), iconSize: null,
-        html: `<span>${esc(c.name)}${ok ? "" : "<small>no parcel data</small>"}</span>` }) }).addTo(countyLabels);
+        html: `<span>${esc(c.name)}${ok ? "" : `<small>${note}</small>`}</span>` }) }).addTo(countyLabels);
   }
 }
 setCountyShapes(SD_COUNTIES_COARSE.map(c => ({ name: c.n, rings: c.r })), false);
@@ -874,7 +902,10 @@ async function identify(lat, lng, fromMe) {
       if (!secs.length) throw new Error("none");
       if (!sale.length) setSale([secs[0]], "");
       else showTapped(secs[0], fromMe);
-      setStatus(`${cands[0]} County has no parcel data here. Showing Sec ${secs[0].short}.`);
+      autoRegrid(cands[0]);
+      setStatus(OUTLINE_ONLY[cands[0]]
+        ? `${cands[0]} County: parcel outlines only (Regrid). Showing Sec ${secs[0].short}.`
+        : `${cands[0]} County has no parcel data here. Showing Sec ${secs[0].short}.`);
       update();
     } catch (e) {
       showTapped(null);
@@ -1038,6 +1069,32 @@ async function testCounty(name) {
 }
 
 const PLSS_TEST = `PLSS ${PLSS_SOURCE}`;
+const REGRID_TEST = "Regrid outlines";
+const OUTLINE_LIST = Object.keys(OUTLINE_ONLY).sort();
+
+// Loads one outline tile over Spearfish (Lawrence Co.) as an image, the same way the map does.
+function testRegrid() {
+  const r = { county: REGRID_TEST, src: "Regrid", status: "FAIL", notes: [], ms: 0 };
+  const t0 = performance.now(), z = 15, lat = 44.49, lng = -103.86;
+  const n = 2 ** z, x = Math.floor((lng + 180) / 360 * n);
+  const y = Math.floor((1 - Math.asinh(Math.tan(lat * Math.PI / 180)) / Math.PI) / 2 * n);
+  const url = `${REGRID_TILES}/tile/${z}/${y}/${x}`;
+  return new Promise(resolve => {
+    const img = new Image();
+    const finish = (status, note) => {
+      clearTimeout(timer); r.status = status; r.notes.push(note);
+      r.ms = Math.round(performance.now() - t0); resolve(r);
+    };
+    const timer = setTimeout(() => finish("FAIL", `tile ${z}/${y}/${x} timed out`), 20000);
+    img.onload = () => finish("PASS", `tile ${z}/${y}/${x} loaded (${img.naturalWidth}x${img.naturalHeight})`);
+    img.onerror = () => finish("FAIL", `tile ${z}/${y}/${x} did not load`);
+    img.src = url;
+  });
+}
+function outlineRow(name) {
+  return { county: name, src: "Regrid", status: "LINES", ms: 0,
+    notes: [`outlines only, refreshed ${OUTLINE_ONLY[name]}; no parcel ID, owner, legal or acres`] };
+}
 // Tests the active source with no fallback, so a GFP failure shows as a failure.
 async function testPLSS() {
   const r = { county: PLSS_TEST, src: PLSS_SOURCE, status: "FAIL", notes: [], ms: 0 };
@@ -1080,29 +1137,31 @@ async function testPLSS() {
 async function runSelfTest() {
   const panel = document.createElement("section");
   panel.className = "testpanel";
-  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.10</small></h1><div class="summary" id="tsum">Starting…</div>
+  panel.innerHTML = `<h1>County self-test <small style="font-size:16px;color:var(--muted)">v0.11</small></h1><div class="summary" id="tsum">Starting…</div>
     <div class="tbtns"><button id="tcopy" class="primary" disabled>Copy results</button><a class="btn" href="./">Close</a></div>
     <div id="trows"></div>`;
   document.body.appendChild(panel);
   const rows = {};
-  for (const c of [...COUNTIES, PLSS_TEST]) {
+  const ALL = [...COUNTIES, PLSS_TEST, REGRID_TEST, ...OUTLINE_LIST];
+  for (const c of ALL) {
     const d = document.createElement("div");
     d.className = "trow";
     d.innerHTML = `<span class="st">…</span><span class="nm">${esc(c)}</span><span class="nt"></span>`;
     $("trows").appendChild(d);
     rows[c] = d;
   }
-  const results = [], queue = [...COUNTIES, PLSS_TEST];
+  const results = [], queue = [...ALL];
   const tally = () => {
     const n = k => results.filter(r => r.status === k).length;
-    $("tsum").textContent = `${results.length} of ${COUNTIES.length + 1} done: ${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail`
+    $("tsum").textContent = `${results.length} of ${ALL.length} done: ${n("PASS")} pass, ${n("WARN")} warn, ${n("FAIL")} fail, ${n("LINES")} outlines only`
       + (transport === "jsonp" ? " (fallback route in use)" : "");
   };
   async function worker() {
     while (queue.length) {
       const c = queue.shift();
       rows[c].querySelector(".st").textContent = "…";
-      const r = c === PLSS_TEST ? await testPLSS() : await testCounty(c);
+      const r = c === PLSS_TEST ? await testPLSS() : c === REGRID_TEST ? await testRegrid()
+        : OUTLINE_ONLY[c] ? outlineRow(c) : await testCounty(c);
       results.push(r);
       const st = rows[c].querySelector(".st");
       st.textContent = r.status; st.className = "st " + r.status;
@@ -1113,8 +1172,8 @@ async function runSelfTest() {
   }
   await Promise.all([worker(), worker(), worker(), worker()]);
   // failures first in the copied text
-  const order = { FAIL: 0, WARN: 1, PASS: 2 };
-  const text = `Sale Inspector v0.10 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
+  const order = { FAIL: 0, WARN: 1, PASS: 2, LINES: 3 };
+  const text = `Sale Inspector v0.11 self-test ${new Date().toLocaleString()}\n${$("tsum").textContent}\n\n`
     + results.sort((a, b) => order[a.status] - order[b.status] || a.county.localeCompare(b.county))
         .map(r => `${r.status.padEnd(4)}  ${r.county}${r.src ? " (" + r.src + ")" : ""}: ${r.notes.join("; ")}`).join("\n");
   const btn = $("tcopy");
